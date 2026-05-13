@@ -60,7 +60,7 @@ def main():
     label_col = dataset_config.get('label_column', 'label')
     
     accelerator.print(f"Loading dataset {dataset_name}...")
-    dataset = load_dataset(dataset_name, trust_remote_code=True)
+    dataset = load_dataset(dataset_name)
     
     model_name = model_config.get('name', 'Qwen/Qwen3.5-0.8B')
     num_labels = model_config.get('num_labels', 77)
@@ -76,7 +76,8 @@ def main():
     
     accelerator.print("Tokenizing dataset...")
     with accelerator.main_process_first():
-        tokenized_datasets = dataset.map(tokenize_function, batched=True, remove_columns=[text_col])
+        remove_cols = [col for col in dataset["train"].column_names if col != label_col]
+        tokenized_datasets = dataset.map(tokenize_function, batched=True, remove_columns=remove_cols)
         tokenized_datasets.set_format("torch")
         
         # Rename label column to plural 'labels' to follow Hugging Face conventions perfectly
