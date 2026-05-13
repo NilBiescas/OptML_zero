@@ -70,13 +70,23 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
         
-    # Get the names of the labels from the training dataset features
-    label_names = dataset["train"].features[label_col].names
-    
+    # Robustly get/convert label to string
+    has_label_text = "label_text" in dataset["train"].column_names
+    label_names = None
+    if not has_label_text:
+        feature = dataset["train"].features[label_col]
+        if hasattr(feature, "names"):
+            label_names = feature.names
+            
     # 1. Format the dataset into "User: <text>\nAssistant: <label_name>"
     def format_example(example):
         text = example[text_col]
-        label = label_names[example[label_col]]
+        if has_label_text:
+            label = str(example["label_text"])
+        elif label_names is not None:
+            label = str(label_names[example[label_col]])
+        else:
+            label = str(example[label_col])
         
         prompt = f"User: {text}\nAssistant:"
         answer = f" {label}"
