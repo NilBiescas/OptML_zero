@@ -247,6 +247,12 @@ def main():
             if is_zeroth_order:
                 batch = {k: v.to(accelerator.device) for k, v in batch.items()}
                 
+                debug_print = (global_step % 10 == 0) and accelerator.is_local_main_process
+                if debug_print:
+                    non_masked = (batch["labels"] != -100).sum().item()
+                    total_elem = batch["labels"].numel()
+                    accelerator.print(f"\n[DEBUG Step {global_step}] Batch input_ids: {batch['input_ids'].shape}, Non-masked labels: {non_masked}/{total_elem}")
+
                 def closure():
                     outputs = model(
                         input_ids=batch["input_ids"],
@@ -254,8 +260,12 @@ def main():
                         labels=batch["labels"]
                     )
                     loss = outputs.loss
+                    if debug_print:
+                        accelerator.print(f"[DEBUG Step {global_step}] Raw Model loss: {loss.item() if loss is not None else 'None'}")
                     # Distributed reduction for multi-GPU ZO gradient consistency
                     avg_loss = accelerator.reduce(loss.detach(), reduction="mean")
+                    if debug_print:
+                        accelerator.print(f"[DEBUG Step {global_step}] Reduced avg_loss: {avg_loss.item() if avg_loss is not None else 'None'}")
                     return avg_loss
                     
                 loss = optimizer.step(closure)
