@@ -253,8 +253,9 @@ def main():
                     total_elem = batch["labels"].numel()
                     accelerator.print(f"\n[DEBUG Step {global_step}] Batch input_ids: {batch['input_ids'].shape}, Non-masked labels: {non_masked}/{total_elem}")
 
+                unwrapped_model = accelerator.unwrap_model(model)
                 def closure():
-                    outputs = model(
+                    outputs = unwrapped_model(
                         input_ids=batch["input_ids"],
                         attention_mask=batch["attention_mask"],
                         labels=batch["labels"]
@@ -323,14 +324,18 @@ def main():
         
         # Evaluation
         if eval_dataloader:
+            accelerator.print(f"\n--- Starting Evaluation for Epoch {epoch+1} ---")
             model.eval()
             total_eval_loss = 0
             correct_tokens = 0
             total_tokens = 0
+            eval_unwrapped_model = accelerator.unwrap_model(model)
             with torch.no_grad():
-                for batch in eval_dataloader:
+                for eval_step_idx, batch in enumerate(eval_dataloader):
+                    if eval_step_idx % 10 == 0 and accelerator.is_local_main_process:
+                        accelerator.print(f"[Eval Epoch {epoch+1}] Processing batch {eval_step_idx}/{len(eval_dataloader)}")
                     batch = {k: v.to(accelerator.device) for k, v in batch.items()}
-                    outputs = model(
+                    outputs = eval_unwrapped_model(
                         input_ids=batch["input_ids"],
                         attention_mask=batch["attention_mask"],
                         labels=batch["labels"]
@@ -366,15 +371,22 @@ def main():
             }, step=global_step)
             
             if accelerator.is_local_main_process:
+                accelerator.print("Saving checkpoints on main process...")
                 unwrapped_model = accelerator.unwrap_model(model)
                 if avg_eval_loss < best_eval_loss:
                     best_eval_loss = avg_eval_loss
-                    accelerator.print(f"New best validation loss ({avg_eval_loss:.4f})! Saving checkpoints...")
+                    accelerator.print(f"New best validation loss ({avg_eval_loss:.4f})! Saving best_checkpoint_causal...")
                     unwrapped_model.save_pretrained("best_checkpoint_causal")
                     tokenizer.save_pretrained("best_checkpoint_causal")
                     
+                accelerator.print("Saving last_checkpoint_causal...")
                 unwrapped_model.save_pretrained("last_checkpoint_causal")
                 tokenizer.save_pretrained("last_checkpoint_causal")
+                accelerator.print("Checkpoints saved successfully.")
+            
+            # CRITICAL MULTI-GPU BARRIER: Wait for main process to finish disk I/O before continuing training!
+            accelerator.wait_for_everyone()
+            accelerator.print(f"--- Evaluation for Epoch {epoch+1} Complete ---\n")
                 
         epoch += 1
         # This condition is now redundant as max_tokens logic is handled per batch step

@@ -47,7 +47,9 @@ class LOZO(Optimizer):
                 # Deterministic seed combining base seed, parameter ID, and step number
                 # ensures perfect alignment across different GPU processes
                 param_seed = seed + state['step'] + param_id * 1000003
-                generator = torch.Generator(device=p.device)
+                if 'generator' not in state:
+                    state['generator'] = torch.Generator(device=p.device)
+                generator = state['generator']
                 generator.manual_seed(param_seed)
                 
                 if p.dim() >= 2:
@@ -173,7 +175,9 @@ class LOZOM(Optimizer):
                 # Deterministic seed combining base seed, parameter ID, and step number
                 # ensures perfect alignment across different GPU processes
                 param_seed = seed + state['step'] + param_id * 1000003
-                generator = torch.Generator(device=p.device)
+                if 'generator' not in state:
+                    state['generator'] = torch.Generator(device=p.device)
+                generator = state['generator']
                 generator.manual_seed(param_seed)
                 
                 if p.dim() >= 2:
