@@ -259,6 +259,9 @@ def main():
                     return avg_loss
                     
                 loss = optimizer.step(closure)
+                if loss is None:
+                    # Fallback if closure doesn't return loss correctly
+                    loss = 0.0
                 total_loss += loss
                 progress_bar.set_description(f"Epoch {epoch+1} Loss: {loss:.4f}")
                 train_loss_val = loss
