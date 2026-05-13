@@ -16,7 +16,7 @@ training:
 optimizer:
   name: "LOZO" # Can be LOZO or LOZOM
   kwargs:
-    lr: 1.0e-4
+    lr: 1.0e-5
     eps: 1.0e-3
     r: 4
     nu: 50
