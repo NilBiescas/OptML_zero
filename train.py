@@ -350,12 +350,16 @@ def main():
                     
                     # Target labels mask
                     labels = batch["labels"]
+                    local_mask = (labels != -100)
+                    local_correct = (predictions[local_mask] == labels[local_mask]).sum().to(accelerator.device)
+                    local_total = local_mask.sum().to(accelerator.device)
                     
-                    # Unconditionally gather predictions and labels across all GPUs to avoid asymmetric deadlock
-                    predictions, labels = accelerator.gather_for_metrics((predictions, labels))
-                    mask = (labels != -100)
-                    correct_tokens += (predictions[mask] == labels[mask]).sum().item()
-                    total_tokens += mask.sum().item()
+                    # Reduce scalars across all GPUs (100% robust against differing dynamic padding seq_len across GPUs)
+                    batch_correct = accelerator.reduce(local_correct, reduction="sum")
+                    batch_total = accelerator.reduce(local_total, reduction="sum")
+                    
+                    correct_tokens += batch_correct.item()
+                    total_tokens += batch_total.item()
                         
             avg_eval_loss = total_eval_loss / len(eval_dataloader)
             perplexity = math.exp(avg_eval_loss) if avg_eval_loss < 20 else float('inf')
