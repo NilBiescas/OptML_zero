@@ -9,7 +9,7 @@ model:
 
 training:
   epochs: 3
-  batch_size: 8 # Reverting to 8 for the banking dataset
+  batch_size: 64 # Maximizing A100 VRAM utilization for high-throughput zeroth-order training
   seed: 42
   #max_tokens: 100000 # Uncomment to train for specific token counts instead of epochs
 
