@@ -16,6 +16,8 @@ IMAGE="registry.rcp.epfl.ch/course-cs-552/base-vllm:v1"
 # Source environment variables
 if [ -f .env ]; then
     export $(grep -v '^#' .env | xargs)
+elif [ -f ../.env ]; then
+    export $(grep -v '^#' ../.env | xargs)
 fi
 
 echo ">>> Submitting ${JOB_NAME} (${GPUS} GPUs, preemptible training job)"
