@@ -79,16 +79,30 @@ def main():
         if label_col in tokenized_datasets['train'].column_names:
             tokenized_datasets = tokenized_datasets.rename_column(label_col, 'labels')
             
+        # Dynamically split 'train' to create a validation split if not present (to leave 'test' untouched for final evaluation!)
+        if "test" in tokenized_datasets and "validation" not in tokenized_datasets:
+            accelerator.print("Splitting training set to create a dynamic 'validation' split (10%)...")
+            split_dataset = tokenized_datasets["train"].train_test_split(test_size=0.1, seed=seed)
+            from datasets import DatasetDict
+            tokenized_datasets = DatasetDict({
+                "train": split_dataset["train"],
+                "validation": split_dataset["test"],
+                "test": tokenized_datasets["test"]
+            })
+            
     # Use DataCollatorWithPadding for dynamic padding (makes training up to 4x faster!)
     data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
     
     train_dataloader = DataLoader(tokenized_datasets["train"], shuffle=True, batch_size=batch_size, collate_fn=data_collator)
-    if "test" in tokenized_datasets:
-        eval_dataloader = DataLoader(tokenized_datasets["test"], batch_size=batch_size, collate_fn=data_collator)
-    elif "validation" in tokenized_datasets:
+    if "validation" in tokenized_datasets:
         eval_dataloader = DataLoader(tokenized_datasets["validation"], batch_size=batch_size, collate_fn=data_collator)
     else:
         eval_dataloader = None
+        
+    if "test" in tokenized_datasets:
+        test_dataloader = DataLoader(tokenized_datasets["test"], batch_size=batch_size, collate_fn=data_collator)
+    else:
+        test_dataloader = None
         
     # Print a few tokenized examples to verify what is going into the model
     if accelerator.is_local_main_process:
@@ -138,6 +152,8 @@ def main():
         optimizer, train_dataloader = accelerator.prepare(optimizer, train_dataloader)
         if eval_dataloader:
             eval_dataloader = accelerator.prepare(eval_dataloader)
+        if test_dataloader:
+            test_dataloader = accelerator.prepare(test_dataloader)
     else:
         # For standard first-order optimizers
         if hasattr(torch.optim, opt_name):
@@ -149,6 +165,8 @@ def main():
         model, optimizer, train_dataloader = accelerator.prepare(model, optimizer, train_dataloader)
         if eval_dataloader:
             eval_dataloader = accelerator.prepare(eval_dataloader)
+        if test_dataloader:
+            test_dataloader = accelerator.prepare(test_dataloader)
             
     accelerator.print(f"Starting training for {epochs} epochs using {opt_name} optimizer")
     
@@ -290,6 +308,41 @@ def main():
     accelerator.print(f"Training completed in {total_run_time:.2f} seconds.")
     # Log the final total time
     accelerator.log({"final_total_time_sec": total_run_time}, step=global_step)
+    
+    # Final evaluation on the unseen test set
+    if test_dataloader:
+        accelerator.print("\n=== Running Final Evaluation on the Unseen Test Set ===")
+        # Load the best checkpoint if it exists, otherwise use current weights
+        if os.path.exists("best_checkpoint"):
+            accelerator.print("Loading best checkpoint for final test evaluation...")
+            model = AutoModelForSequenceClassification.from_pretrained("best_checkpoint", trust_remote_code=True).to(accelerator.device)
+            
+        model.eval()
+        correct = 0
+        total = 0
+        total_test_loss = 0
+        with torch.no_grad():
+            for batch in test_dataloader:
+                batch = {k: v.to(accelerator.device) for k, v in batch.items()}
+                outputs = model(**batch)
+                test_loss = outputs.loss
+                predictions = outputs.logits.argmax(dim=-1)
+                
+                # Gather predictions across devices
+                predictions, labels = accelerator.gather_for_metrics((predictions, batch["labels"]))
+                avg_loss = accelerator.reduce(test_loss.detach(), reduction="mean")
+                
+                correct += (predictions == labels).sum().item()
+                total += labels.size(0)
+                total_test_loss += avg_loss.item()
+                
+        test_accuracy = correct / total
+        avg_test_loss = total_test_loss / len(test_dataloader)
+        accelerator.print(f"Final Test Accuracy: {test_accuracy:.4f} | Final Test Loss: {avg_test_loss:.4f}")
+        accelerator.log({
+            "test_accuracy": test_accuracy,
+            "test_loss": avg_test_loss
+        }, step=global_step)
     
     accelerator.end_training()
     accelerator.wait_for_everyone()
