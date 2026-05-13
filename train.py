@@ -57,13 +57,13 @@ def main():
     label_col = dataset_config.get('label_column', 'label')
     
     accelerator.print(f"Loading dataset {dataset_name}...")
-    dataset = load_dataset(dataset_name)
+    dataset = load_dataset(dataset_name, trust_remote_code=True)
     
     model_name = model_config.get('name', 'Qwen/Qwen3.5-0.8B')
     num_labels = model_config.get('num_labels', 77)
     
     accelerator.print(f"Loading tokenizer and model: {model_name}...")
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     
@@ -101,7 +101,7 @@ def main():
             accelerator.print(f"  Label ID: {label.item() if hasattr(label, 'item') else label}\n")
         accelerator.print("===============================\n")
     
-    model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=num_labels)
+    model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=num_labels, trust_remote_code=True)
     model.config.pad_token_id = tokenizer.pad_token_id
     
     opt_name = opt_config.get('name', 'LOZO')
