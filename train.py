@@ -345,13 +345,13 @@ def main():
                     total_eval_loss += avg_loss.item()
                     
                     # Compute token-level accuracy over prediction targets
-                    logits = outputs.logits
-                    predictions = logits.argmax(dim=-1)
+                    # Shift logits and labels so that prediction L_i aligns with target y_{i+1}
+                    shift_logits = outputs.logits[..., :-1, :].contiguous()
+                    shift_labels = batch["labels"][..., 1:].contiguous()
+                    predictions = shift_logits.argmax(dim=-1)
                     
-                    # Target labels mask
-                    labels = batch["labels"]
-                    local_mask = (labels != -100)
-                    local_correct = (predictions[local_mask] == labels[local_mask]).sum().to(accelerator.device)
+                    local_mask = (shift_labels != -100)
+                    local_correct = (predictions[local_mask] == shift_labels[local_mask]).sum().to(accelerator.device)
                     local_total = local_mask.sum().to(accelerator.device)
                     
                     # Reduce scalars across all GPUs (100% robust against differing dynamic padding seq_len across GPUs)
@@ -363,7 +363,7 @@ def main():
                     
                     if eval_step_idx == 0 and accelerator.is_local_main_process and local_mask.sum() > 0:
                         sample_preds = predictions[local_mask][:20]
-                        sample_targets = labels[local_mask][:20]
+                        sample_targets = shift_labels[local_mask][:20]
                         pred_str = tokenizer.decode(sample_preds)
                         target_str = tokenizer.decode(sample_targets)
                         accelerator.print(f"\n[EVAL SANITY CHECK] Sample predictions decoded: {repr(pred_str)}")
@@ -435,14 +435,17 @@ def main():
                 
                 shift_logits = outputs.logits[..., :-1, :].contiguous()
                 shift_labels = batch["labels"][..., 1:].contiguous()
-                
                 predictions = shift_logits.argmax(dim=-1)
                 
-                mask = (shift_labels != -100)
-                if mask.sum() > 0:
-                    predictions, shift_labels, mask = accelerator.gather_for_metrics((predictions, shift_labels, mask))
-                    correct_tokens += (predictions[mask] == shift_labels[mask]).sum().item()
-                    total_tokens += mask.sum().item()
+                local_mask = (shift_labels != -100)
+                local_correct = (predictions[local_mask] == shift_labels[local_mask]).sum().to(accelerator.device)
+                local_total = local_mask.sum().to(accelerator.device)
+                
+                batch_correct = accelerator.reduce(local_correct, reduction="sum")
+                batch_total = accelerator.reduce(local_total, reduction="sum")
+                
+                correct_tokens += batch_correct.item()
+                total_tokens += batch_total.item()
                     
         avg_test_loss = total_test_loss / len(test_dataloader)
         test_perplexity = math.exp(avg_test_loss) if avg_test_loss < 20 else float('inf')
