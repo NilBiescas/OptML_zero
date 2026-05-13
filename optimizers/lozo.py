@@ -39,15 +39,17 @@ class LOZO(Optimizer):
                 
                 if state['step'] % nu == 0:
                     # Resample V_l
-                    state['V'] = torch.randn(p.size(1) if p.dim() > 1 else 1, r, dtype=p.dtype).to(p.device)
+                    V_dim = p.numel() // p.size(0) if p.dim() >= 2 else 1
+                    state['V'] = torch.randn(V_dim, r, dtype=p.dtype).to(p.device)
                 
                 # Sample U_l
                 state['U'] = torch.randn(p.size(0), r, dtype=p.dtype).to(p.device)
                 
                 # Perturb X_l <- X_l + eps * U_l V_l^T
-                # Use addmm_ to apply low-rank perturbation directly without instantiating the full-size matrix!
-                if p.dim() > 1:
-                    p.addmm_(state['U'], state['V'].T, alpha=eps, beta=1.0)
+                # Use addmm_ on a 2D view to handle ND parameters cleanly (e.g. Conv2D)
+                if p.dim() >= 2:
+                    p_view = p.view(p.size(0), -1)
+                    p_view.addmm_(state['U'], state['V'].T, alpha=eps, beta=1.0)
                 else:
                     p.add_((state['U'] @ state['V'].T).squeeze(-1), alpha=eps)
         
@@ -65,8 +67,9 @@ class LOZO(Optimizer):
                 state = self.state[p]
                 
                 # X_l <- X_l - 2 * eps * U_l V_l^T (effectively X_old - eps * U_l V_l^T)
-                if p.dim() > 1:
-                    p.addmm_(state['U'], state['V'].T, alpha=-2 * eps, beta=1.0)
+                if p.dim() >= 2:
+                    p_view = p.view(p.size(0), -1)
+                    p_view.addmm_(state['U'], state['V'].T, alpha=-2 * eps, beta=1.0)
                 else:
                     p.sub_((state['U'] @ state['V'].T).squeeze(-1), alpha=2 * eps)
                 
@@ -89,8 +92,9 @@ class LOZO(Optimizer):
                 
                 # Reset to original X_l and update X_l <- X_l - lr * c * U_l V_l^T / r_l
                 net_alpha = eps - (lr * c / r)
-                if p.dim() > 1:
-                    p.addmm_(state['U'], state['V'].T, alpha=net_alpha, beta=1.0)
+                if p.dim() >= 2:
+                    p_view = p.view(p.size(0), -1)
+                    p_view.addmm_(state['U'], state['V'].T, alpha=net_alpha, beta=1.0)
                 else:
                     p.add_((state['U'] @ state['V'].T).squeeze(-1), alpha=net_alpha)
                 
@@ -137,23 +141,26 @@ class LOZOM(Optimizer):
                     state['N'] = torch.zeros(p.size(0), r, device=p.device, dtype=p.dtype)
                 
                 if state['step'] % nu == 0:
+                    V_dim = p.numel() // p.size(0) if p.dim() >= 2 else 1
                     if 'V' in state:
                         V_old = state['V']
-                        V_new = torch.randn(p.size(1) if p.dim() > 1 else 1, r, dtype=p.dtype).to(p.device)
-                        n_l = p.size(1) if p.dim() > 1 else 1
+                        V_new = torch.randn(V_dim, r, dtype=p.dtype).to(p.device)
                         
-                        # Project momentum onto the new subspace: N = N_old @ V_old.T @ V_new / n_l
-                        state['N'] = (state['N'] @ V_old.T @ V_new) / n_l
+                        # Project momentum onto the new subspace: N = N_old @ (V_old.T @ V_new) / V_dim
+                        # Mathematically critical parentheses around (V_old.T @ V_new) to avoid 
+                        # an O(d*d) intermediate matrix materialization!
+                        state['N'] = (state['N'] @ (V_old.T @ V_new)) / V_dim
                         state['V'] = V_new
                     else:
-                        state['V'] = torch.randn(p.size(1) if p.dim() > 1 else 1, r, dtype=p.dtype).to(p.device)
+                        state['V'] = torch.randn(V_dim, r, dtype=p.dtype).to(p.device)
                 
                 # Sample U_l
                 state['U'] = torch.randn(p.size(0), r, dtype=p.dtype).to(p.device)
                 
                 # Perturb X_l <- X_l + eps * U_l V_l^T
-                if p.dim() > 1:
-                    p.addmm_(state['U'], state['V'].T, alpha=eps, beta=1.0)
+                if p.dim() >= 2:
+                    p_view = p.view(p.size(0), -1)
+                    p_view.addmm_(state['U'], state['V'].T, alpha=eps, beta=1.0)
                 else:
                     p.add_((state['U'] @ state['V'].T).squeeze(-1), alpha=eps)
         
@@ -171,8 +178,9 @@ class LOZOM(Optimizer):
                 state = self.state[p]
                 
                 # X_l <- X_l - 2 * eps * U_l V_l^T
-                if p.dim() > 1:
-                    p.addmm_(state['U'], state['V'].T, alpha=-2 * eps, beta=1.0)
+                if p.dim() >= 2:
+                    p_view = p.view(p.size(0), -1)
+                    p_view.addmm_(state['U'], state['V'].T, alpha=-2 * eps, beta=1.0)
                 else:
                     p.sub_((state['U'] @ state['V'].T).squeeze(-1), alpha=2 * eps)
                 
@@ -195,8 +203,9 @@ class LOZOM(Optimizer):
                 state = self.state[p]
                 
                 # Reset to original X_l
-                if p.dim() > 1:
-                    p.addmm_(state['U'], state['V'].T, alpha=eps, beta=1.0)
+                if p.dim() >= 2:
+                    p_view = p.view(p.size(0), -1)
+                    p_view.addmm_(state['U'], state['V'].T, alpha=eps, beta=1.0)
                 else:
                     p.add_((state['U'] @ state['V'].T).squeeze(-1), alpha=eps)
                 
@@ -204,8 +213,9 @@ class LOZOM(Optimizer):
                 state['N'].mul_(beta).add_(state['U'], alpha=(1 - beta) * c)
                 
                 # Update X_l <- X_l - lr * N_l V_l^T / r_l
-                if p.dim() > 1:
-                    p.addmm_(state['N'], state['V'].T, alpha=-lr / r, beta=1.0)
+                if p.dim() >= 2:
+                    p_view = p.view(p.size(0), -1)
+                    p_view.addmm_(state['N'], state['V'].T, alpha=-lr / r, beta=1.0)
                 else:
                     p.sub_((state['N'] @ state['V'].T).squeeze(-1), alpha=lr / r)
                 
