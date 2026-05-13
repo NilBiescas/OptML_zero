@@ -38,7 +38,7 @@ git pull --ff-only || echo "git pull failed (or repo offline) — continuing wit
 echo ">>> Installing dependencies for Classification LOZO"
 pip install --upgrade transformers datasets accelerate evaluate pyyaml
 
-echo ">>> Starting Classification LOZO training (config.yaml)"
-accelerate launch --num_processes 4 train_cls.py --config config.yaml
+echo ">>> Starting Classification LOZO training (classificationhead/config.yaml)"
+accelerate launch --num_processes 4 train_cls.py --config classificationhead/config.yaml
 
 echo ">>> Classification LOZO Training complete."

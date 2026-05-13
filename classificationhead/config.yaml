@@ -25,4 +25,4 @@ optimizer:
 
 hub:
   push_to_hub: true
-  repo_id: "Nbiescas/lozo-qwen-banking77" # IMPORTANT: Change to your actual HF username/repo!
+  repo_id: "Nbiescas/lozo-qwen-banking77_cls" # IMPORTANT: Change to your actual HF username/repo!

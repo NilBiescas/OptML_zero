@@ -123,7 +123,11 @@ def main():
             accelerator.print(f"  Label ID: {label.item() if hasattr(label, 'item') else label}\n")
         accelerator.print("===============================\n")
     
-    model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=num_labels)
+    from transformers import AutoConfig
+    config = AutoConfig.from_pretrained(model_name)
+    config.num_labels = num_labels
+    
+    model = AutoModelForSequenceClassification.from_pretrained(model_name, config=config)
     model.config.pad_token_id = tokenizer.pad_token_id
     accelerator.print(f"Model config num_labels: {model.config.num_labels}")
     if hasattr(model, 'num_labels'):
