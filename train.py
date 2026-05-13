@@ -148,23 +148,18 @@ def main():
     else:
         test_dataloader = None
         
-    # Optional: freeze the model backbone to train only the language modeling head
-    freeze_backbone = model_config.get('freeze_backbone', False)
-    if freeze_backbone:
-        accelerator.print("Freezing model backbone parameters. Only training causal LM head.")
-        if hasattr(model, "base_model"):
-            for param in model.base_model.parameters():
-                param.requires_grad = False
-        else:
-            base_model = getattr(model, "base_model", getattr(model, "model", None))
-            if base_model:
-                for param in base_model.parameters():
-                    param.requires_grad = False
-            else:
-                for name, param in model.named_parameters():
-                    if "lm_head" not in name:
-                        param.requires_grad = False
-                        
+    # Optional: freezing the model backbone is removed. Model must be fully trainable.
+    accelerator.print("Model is fully trainable.")
+
+    # STABLE PARAMETER ID INJECTION:
+    # Inject a deterministic param_id into the parameter objects themselves
+    # before passing them to the optimizer. This guarantees that `lozo.py` 
+    # uses perfectly synchronized random seeds across all GPUs, regardless of 
+    # how Accelerate/DDP wraps or reorders the parameters internally.
+    for i, (name, p) in enumerate(model.named_parameters()):
+        if p.requires_grad:
+            p.param_id = i
+
     # Print a few examples to verify formatting and masking
     if accelerator.is_local_main_process:
         accelerator.print("\n=== Sample Tokenized Generative Inputs ===")
@@ -245,7 +240,9 @@ def main():
                         labels=batch["labels"]
                     )
                     loss = outputs.loss
-                    return loss
+                    # Distributed reduction for multi-GPU ZO gradient consistency
+                    avg_loss = accelerator.reduce(loss.detach(), reduction="mean")
+                    return avg_loss
                     
                 loss = optimizer.step(closure)
                 total_loss += loss
@@ -383,14 +380,15 @@ def main():
                 avg_loss = accelerator.reduce(test_loss.detach(), reduction="mean")
                 total_test_loss += avg_loss.item()
                 
-                logits = outputs.logits
-                predictions = logits.argmax(dim=-1)
+                shift_logits = outputs.logits[..., :-1, :].contiguous()
+                shift_labels = batch["labels"][..., 1:].contiguous()
                 
-                labels = batch["labels"]
-                mask = (labels != -100)
+                predictions = shift_logits.argmax(dim=-1)
+                
+                mask = (shift_labels != -100)
                 if mask.sum() > 0:
-                    predictions, labels, mask = accelerator.gather_for_metrics((predictions, labels, mask))
-                    correct_tokens += (predictions[mask] == labels[mask]).sum().item()
+                    predictions, shift_labels, mask = accelerator.gather_for_metrics((predictions, shift_labels, mask))
+                    correct_tokens += (predictions[mask] == shift_labels[mask]).sum().item()
                     total_tokens += mask.sum().item()
                     
         avg_test_loss = total_test_loss / len(test_dataloader)

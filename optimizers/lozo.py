@@ -41,13 +41,12 @@ class LOZO(Optimizer):
                 if len(state) == 0:
                     state['step'] = 0
                 
-                # Assign a unique parameter ID to guarantee distinct random sequences for distinct layers
-                if 'param_id' not in state:
-                    state['param_id'] = len(self.state)
+                # Retrieve the deterministic parameter ID injected by the training loop
+                param_id = getattr(p, 'param_id', 0)
                 
                 # Deterministic seed combining base seed, parameter ID, and step number
                 # ensures perfect alignment across different GPU processes
-                param_seed = seed + state['step'] + state['param_id'] * 1000003
+                param_seed = seed + state['step'] + param_id * 1000003
                 generator = torch.Generator(device=p.device)
                 generator.manual_seed(param_seed)
                 
@@ -162,13 +161,12 @@ class LOZOM(Optimizer):
                     else:
                         state['N_1d'] = torch.zeros_like(p)
                 
-                # Assign a unique parameter ID to guarantee distinct random sequences for distinct layers
-                if 'param_id' not in state:
-                    state['param_id'] = len(self.state)
+                # Retrieve the deterministic parameter ID injected by the training loop
+                param_id = getattr(p, 'param_id', 0)
                 
                 # Deterministic seed combining base seed, parameter ID, and step number
                 # ensures perfect alignment across different GPU processes
-                param_seed = seed + state['step'] + state['param_id'] * 1000003
+                param_seed = seed + state['step'] + param_id * 1000003
                 generator = torch.Generator(device=p.device)
                 generator.manual_seed(param_seed)
                 
@@ -244,8 +242,8 @@ class LOZOM(Optimizer):
                     # Update momentum: N_l = beta * N_l + (1 - beta) * c * U_l
                     state['N'].mul_(beta).add_(state['U'], alpha=(1 - beta) * c)
                     
-                    # Update X_l <- X_l - lr * N_l V_l^T / r
-                    p_view.addmm_(state['N'], state['V'].T, alpha=-lr / r, beta=1.0)
+                    # Update X_l <- X_l - lr * N_l V_l^T
+                    p_view.addmm_(state['N'], state['V'].T, alpha=-lr, beta=1.0)
                 else:
                     # Reset to original X_l
                     p.add_(state['Z'], alpha=eps)
