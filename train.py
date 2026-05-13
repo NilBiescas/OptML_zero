@@ -254,6 +254,7 @@ def main():
                     accelerator.print(f"\n[DEBUG Step {global_step}] Batch input_ids: {batch['input_ids'].shape}, Non-masked labels: {non_masked}/{total_elem}")
 
                 unwrapped_model = accelerator.unwrap_model(model)
+                step_loss_container = []
                 def closure():
                     outputs = unwrapped_model(
                         input_ids=batch["input_ids"],
@@ -267,12 +268,11 @@ def main():
                     avg_loss = accelerator.reduce(loss.detach(), reduction="mean")
                     if debug_print:
                         accelerator.print(f"[DEBUG Step {global_step}] Reduced avg_loss: {avg_loss.item() if avg_loss is not None else 'None'}")
+                    step_loss_container.append(avg_loss.item())
                     return avg_loss
                     
-                loss = optimizer.step(closure)
-                if loss is None:
-                    # Fallback if closure doesn't return loss correctly
-                    loss = 0.0
+                optimizer.step(closure)
+                loss = step_loss_container[0] if len(step_loss_container) > 0 else 0.0
                 total_loss += loss
                 progress_bar.set_description(f"Epoch {epoch+1} Loss: {loss:.4f}")
                 train_loss_val = loss
@@ -350,11 +350,12 @@ def main():
                     
                     # Target labels mask
                     labels = batch["labels"]
+                    
+                    # Unconditionally gather predictions and labels across all GPUs to avoid asymmetric deadlock
+                    predictions, labels = accelerator.gather_for_metrics((predictions, labels))
                     mask = (labels != -100)
-                    if mask.sum() > 0:
-                        predictions, labels, mask = accelerator.gather_for_metrics((predictions, labels, mask))
-                        correct_tokens += (predictions[mask] == labels[mask]).sum().item()
-                        total_tokens += mask.sum().item()
+                    correct_tokens += (predictions[mask] == labels[mask]).sum().item()
+                    total_tokens += mask.sum().item()
                         
             avg_eval_loss = total_eval_loss / len(eval_dataloader)
             perplexity = math.exp(avg_eval_loss) if avg_eval_loss < 20 else float('inf')
