@@ -99,8 +99,8 @@ class LOZO(Optimizer):
         
         # DEBUG PRINTING (Once every 10 steps or first step)
         step_idx = getattr(self, '_step_count', 0)
-        if step_idx % 10 == 0:
-            print(f"[LOZO Optimizer Debug] step: {step_idx} | loss_plus: {loss_plus:.8f} | loss_minus: {loss_minus:.8f} | diff: {loss_plus - loss_minus:.8e} | c: {c:.8e}")
+        # if step_idx % 10 == 0:
+        #     print(f"[LOZO Optimizer Debug] step: {step_idx} | loss_plus: {loss_plus:.8f} | loss_minus: {loss_minus:.8f} | diff: {loss_plus - loss_minus:.8e} | c: {c:.8e}")
         self._step_count = step_idx + 1
         
         for group in self.param_groups:
@@ -236,8 +236,8 @@ class LOZOM(Optimizer):
         
         # DEBUG PRINTING (Once every 10 steps or first step)
         step_idx = getattr(self, '_step_count', 0)
-        if step_idx % 10 == 0:
-            print(f"[LOZOM Optimizer Debug] step: {step_idx} | loss_plus: {loss_plus:.8f} | loss_minus: {loss_minus:.8f} | diff: {loss_plus - loss_minus:.8e} | c: {c:.8e}")
+        # if step_idx % 10 == 0:
+        #     print(f"[LOZOM Optimizer Debug] step: {step_idx} | loss_plus: {loss_plus:.8f} | loss_minus: {loss_minus:.8f} | diff: {loss_plus - loss_minus:.8e} | c: {c:.8e}")
         self._step_count = step_idx + 1
         
         for group in self.param_groups:

@@ -247,7 +247,7 @@ def main():
             if is_zeroth_order:
                 batch = {k: v.to(accelerator.device) for k, v in batch.items()}
                 
-                debug_print = (global_step % 10 == 0) and accelerator.is_local_main_process
+                debug_print = False
                 if debug_print:
                     non_masked = (batch["labels"] != -100).sum().item()
                     total_elem = batch["labels"].numel()
@@ -332,8 +332,8 @@ def main():
             eval_unwrapped_model = accelerator.unwrap_model(model)
             with torch.no_grad():
                 for eval_step_idx, batch in enumerate(eval_dataloader):
-                    if eval_step_idx % 10 == 0 and accelerator.is_local_main_process:
-                        accelerator.print(f"[Eval Epoch {epoch+1}] Processing batch {eval_step_idx}/{len(eval_dataloader)}")
+                    # if eval_step_idx % 10 == 0 and accelerator.is_local_main_process:
+                    #     accelerator.print(f"[Eval Epoch {epoch+1}] Processing batch {eval_step_idx}/{len(eval_dataloader)}")
                     batch = {k: v.to(accelerator.device) for k, v in batch.items()}
                     outputs = eval_unwrapped_model(
                         input_ids=batch["input_ids"],
@@ -361,13 +361,13 @@ def main():
                     correct_tokens += batch_correct.item()
                     total_tokens += batch_total.item()
                     
-                    if eval_step_idx == 0 and accelerator.is_local_main_process and local_mask.sum() > 0:
-                        sample_preds = predictions[local_mask][:20]
-                        sample_targets = shift_labels[local_mask][:20]
-                        pred_str = tokenizer.decode(sample_preds)
-                        target_str = tokenizer.decode(sample_targets)
-                        accelerator.print(f"\n[EVAL SANITY CHECK] Sample predictions decoded: {repr(pred_str)}")
-                        accelerator.print(f"[EVAL SANITY CHECK] Sample targets decoded:     {repr(target_str)}\n")
+                    # if eval_step_idx == 0 and accelerator.is_local_main_process and local_mask.sum() > 0:
+                    #     sample_preds = predictions[local_mask][:20]
+                    #     sample_targets = shift_labels[local_mask][:20]
+                    #     pred_str = tokenizer.decode(sample_preds)
+                    #     target_str = tokenizer.decode(sample_targets)
+                    #     accelerator.print(f"\n[EVAL SANITY CHECK] Sample predictions decoded: {repr(pred_str)}")
+                    #     accelerator.print(f"[EVAL SANITY CHECK] Sample targets decoded:     {repr(target_str)}\n")
                         
             avg_eval_loss = total_eval_loss / len(eval_dataloader)
             perplexity = math.exp(avg_eval_loss) if avg_eval_loss < 20 else float('inf')
