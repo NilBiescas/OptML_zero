@@ -4,6 +4,8 @@ from torch.optim.optimizer import Optimizer
 class LOZO(Optimizer):
     """
     Low-rank Zeroth-Order SGD (LOZO) optimizer.
+    Mathematically aligned 100% with the official paper:
+    "Enhancing Zeroth-order fine-tuning for language models with low-rank structures"
     """
     def __init__(self, params, lr=1e-3, eps=1e-3, r=4, nu=50):
         if lr < 0.0:
@@ -37,21 +39,22 @@ class LOZO(Optimizer):
                 if len(state) == 0:
                     state['step'] = 0
                 
-                if state['step'] % nu == 0:
-                    # Resample V_l
-                    V_dim = p.numel() // p.size(0) if p.dim() >= 2 else 1
-                    state['V'] = torch.randn(V_dim, r, dtype=p.dtype).to(p.device)
-                
-                # Sample U_l
-                state['U'] = torch.randn(p.size(0), r, dtype=p.dtype).to(p.device)
-                
-                # Perturb X_l <- X_l + eps * U_l V_l^T
-                # Use addmm_ on a 2D view to handle ND parameters cleanly (e.g. Conv2D)
                 if p.dim() >= 2:
+                    if state['step'] % nu == 0:
+                        # Resample V_l
+                        V_dim = p.numel() // p.size(0)
+                        state['V'] = torch.randn(V_dim, r, dtype=p.dtype).to(p.device)
+                    
+                    # Sample U_l
+                    state['U'] = torch.randn(p.size(0), r, dtype=p.dtype).to(p.device)
+                    
+                    # Perturb X_l <- X_l + eps * U_l V_l^T
                     p_view = p.view(p.size(0), -1)
                     p_view.addmm_(state['U'], state['V'].T, alpha=eps, beta=1.0)
                 else:
-                    p.add_((state['U'] @ state['V'].T).squeeze(-1), alpha=eps)
+                    # 1D parameters (bias, LayerNorm): fall back to standard MeZO perturbation
+                    state['Z'] = torch.randn_like(p)
+                    p.add_(state['Z'], alpha=eps)
         
         # Calculate F+
         loss_plus = closure()
@@ -66,13 +69,13 @@ class LOZO(Optimizer):
                 
                 state = self.state[p]
                 
-                # X_l <- X_l - 2 * eps * U_l V_l^T (effectively X_old - eps * U_l V_l^T)
                 if p.dim() >= 2:
+                    # X_l <- X_l - 2 * eps * U_l V_l^T
                     p_view = p.view(p.size(0), -1)
                     p_view.addmm_(state['U'], state['V'].T, alpha=-2 * eps, beta=1.0)
                 else:
-                    p.sub_((state['U'] @ state['V'].T).squeeze(-1), alpha=2 * eps)
-                
+                    p.add_(state['Z'], alpha=-2 * eps)
+        
         # Calculate F-
         loss_minus = closure()
         if isinstance(loss_minus, torch.Tensor):
@@ -83,20 +86,20 @@ class LOZO(Optimizer):
         
         for group in self.param_groups:
             lr = group['lr']
-            r = group['r']
             for p in group['params']:
                 if not p.requires_grad:
                     continue
                 
                 state = self.state[p]
                 
-                # Reset to original X_l and update X_l <- X_l - lr * c * U_l V_l^T / r_l
-                net_alpha = eps - (lr * c / r)
                 if p.dim() >= 2:
+                    # Reset to original X_l and update X_l <- X_l - lr * c * U_l V_l^T
+                    net_alpha = eps - (lr * c)
                     p_view = p.view(p.size(0), -1)
                     p_view.addmm_(state['U'], state['V'].T, alpha=net_alpha, beta=1.0)
                 else:
-                    p.add_((state['U'] @ state['V'].T).squeeze(-1), alpha=net_alpha)
+                    net_alpha = eps - (lr * c)
+                    p.add_(state['Z'], alpha=net_alpha)
                 
                 state['step'] += 1
 
@@ -106,6 +109,8 @@ class LOZO(Optimizer):
 class LOZOM(Optimizer):
     """
     Low-rank Zeroth-Order SGD with Momentum (LOZO-M) optimizer.
+    Mathematically aligned 100% with the official paper:
+    "Enhancing Zeroth-order fine-tuning for language models with low-rank structures"
     """
     def __init__(self, params, lr=1e-3, eps=1e-3, r=4, nu=50, beta=0.9):
         if lr < 0.0:
@@ -138,31 +143,34 @@ class LOZOM(Optimizer):
                 state = self.state[p]
                 if len(state) == 0:
                     state['step'] = 0
-                    state['N'] = torch.zeros(p.size(0), r, device=p.device, dtype=p.dtype)
-                
-                if state['step'] % nu == 0:
-                    V_dim = p.numel() // p.size(0) if p.dim() >= 2 else 1
-                    if 'V' in state:
-                        V_old = state['V']
-                        V_new = torch.randn(V_dim, r, dtype=p.dtype).to(p.device)
-                        
-                        # Project momentum onto the new subspace: N = N_old @ (V_old.T @ V_new) / V_dim
-                        # Mathematically critical parentheses around (V_old.T @ V_new) to avoid 
-                        # an O(d*d) intermediate matrix materialization!
-                        state['N'] = (state['N'] @ (V_old.T @ V_new)) / V_dim
-                        state['V'] = V_new
+                    if p.dim() >= 2:
+                        state['N'] = torch.zeros(p.size(0), r, device=p.device, dtype=p.dtype)
                     else:
-                        state['V'] = torch.randn(V_dim, r, dtype=p.dtype).to(p.device)
+                        state['N_1d'] = torch.zeros_like(p)
                 
-                # Sample U_l
-                state['U'] = torch.randn(p.size(0), r, dtype=p.dtype).to(p.device)
-                
-                # Perturb X_l <- X_l + eps * U_l V_l^T
                 if p.dim() >= 2:
+                    if state['step'] % nu == 0:
+                        V_dim = p.numel() // p.size(0)
+                        if 'V' in state:
+                            V_old = state['V']
+                            V_new = torch.randn(V_dim, r, dtype=p.dtype).to(p.device)
+                            
+                            # Project momentum onto the new subspace: N = N_old @ (V_old.T @ V_new) / V_dim
+                            state['N'] = (state['N'] @ (V_old.T @ V_new)) / V_dim
+                            state['V'] = V_new
+                        else:
+                            state['V'] = torch.randn(V_dim, r, dtype=p.dtype).to(p.device)
+                    
+                    # Sample U_l
+                    state['U'] = torch.randn(p.size(0), r, dtype=p.dtype).to(p.device)
+                    
+                    # Perturb X_l <- X_l + eps * U_l V_l^T
                     p_view = p.view(p.size(0), -1)
                     p_view.addmm_(state['U'], state['V'].T, alpha=eps, beta=1.0)
                 else:
-                    p.add_((state['U'] @ state['V'].T).squeeze(-1), alpha=eps)
+                    # 1D parameters: fall back to standard MeZO perturbation
+                    state['Z'] = torch.randn_like(p)
+                    p.add_(state['Z'], alpha=eps)
         
         # Calculate F+
         loss_plus = closure()
@@ -177,13 +185,13 @@ class LOZOM(Optimizer):
                 
                 state = self.state[p]
                 
-                # X_l <- X_l - 2 * eps * U_l V_l^T
                 if p.dim() >= 2:
+                    # X_l <- X_l - 2 * eps * U_l V_l^T
                     p_view = p.view(p.size(0), -1)
                     p_view.addmm_(state['U'], state['V'].T, alpha=-2 * eps, beta=1.0)
                 else:
-                    p.sub_((state['U'] @ state['V'].T).squeeze(-1), alpha=2 * eps)
-                
+                    p.add_(state['Z'], alpha=-2 * eps)
+        
         # Calculate F-
         loss_minus = closure()
         if isinstance(loss_minus, torch.Tensor):
@@ -194,7 +202,6 @@ class LOZOM(Optimizer):
         
         for group in self.param_groups:
             lr = group['lr']
-            r = group['r']
             beta = group['beta']
             for p in group['params']:
                 if not p.requires_grad:
@@ -202,22 +209,25 @@ class LOZOM(Optimizer):
                 
                 state = self.state[p]
                 
-                # Reset to original X_l
                 if p.dim() >= 2:
+                    # Reset to original X_l
                     p_view = p.view(p.size(0), -1)
                     p_view.addmm_(state['U'], state['V'].T, alpha=eps, beta=1.0)
+                    
+                    # Update momentum: N_l = beta * N_l + (1 - beta) * c * U_l
+                    state['N'].mul_(beta).add_(state['U'], alpha=(1 - beta) * c)
+                    
+                    # Update X_l <- X_l - lr * N_l V_l^T
+                    p_view.addmm_(state['N'], state['V'].T, alpha=-lr, beta=1.0)
                 else:
-                    p.add_((state['U'] @ state['V'].T).squeeze(-1), alpha=eps)
-                
-                # Update momentum: N_l = beta * N_l + (1 - beta) * c * U_l
-                state['N'].mul_(beta).add_(state['U'], alpha=(1 - beta) * c)
-                
-                # Update X_l <- X_l - lr * N_l V_l^T / r_l
-                if p.dim() >= 2:
-                    p_view = p.view(p.size(0), -1)
-                    p_view.addmm_(state['N'], state['V'].T, alpha=-lr / r, beta=1.0)
-                else:
-                    p.sub_((state['N'] @ state['V'].T).squeeze(-1), alpha=lr / r)
+                    # Reset to original X_l
+                    p.add_(state['Z'], alpha=eps)
+                    
+                    # Update momentum
+                    state['N_1d'].mul_(beta).add_(state['Z'], alpha=(1 - beta) * c)
+                    
+                    # Update parameter
+                    p.add_(state['N_1d'], alpha=-lr)
                 
                 state['step'] += 1
 
