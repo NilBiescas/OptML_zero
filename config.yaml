@@ -22,5 +22,5 @@ optimizer:
     nu: 50
 
 hub:
-  push_to_hub: false
+  push_to_hub: true
   repo_id: "Nbiescas/lozo-generative-qwen-banking77"
