@@ -51,6 +51,10 @@ def main():
     # and identical U/V generations in the optimizer across all ranks.
     set_seed(seed)
     torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
     
     dataset_name = dataset_config.get('name', 'PolyAI/banking77')
     text_col = dataset_config.get('text_column', 'text')
@@ -126,14 +130,18 @@ def main():
     freeze_backbone = model_config.get('freeze_backbone', False)
     if freeze_backbone:
         accelerator.print("Freezing model backbone parameters. Only training classification head.")
-        base_model = getattr(model, "base_model", getattr(model, "model", None))
-        if base_model:
-            for param in base_model.parameters():
+        if hasattr(model, "base_model"):
+            for param in model.base_model.parameters():
                 param.requires_grad = False
         else:
-            for name, param in model.named_parameters():
-                if "score" not in name and "classifier" not in name:
+            base_model = getattr(model, "base_model", getattr(model, "model", None))
+            if base_model:
+                for param in base_model.parameters():
                     param.requires_grad = False
+            else:
+                for name, param in model.named_parameters():
+                    if "score" not in name and "classifier" not in name:
+                        param.requires_grad = False
     
     opt_name = opt_config.get('name', 'LOZO')
     opt_kwargs = opt_config.get('kwargs', {})
