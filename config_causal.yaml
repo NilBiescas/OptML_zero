@@ -1,0 +1,26 @@
+dataset:
+  name: "mteb/banking77"
+  text_column: "text"
+  label_column: "label"
+
+model:
+  name: "Qwen/Qwen3.5-0.8B"
+  freeze_backbone: false # Set to true to freeze base layers and only train the language head
+
+training:
+  epochs: 3
+  batch_size: 8 # Generative training is slightly heavier, so 8 is a safe starting point
+  seed: 42
+  max_tokens: 100 # Uncomment to train for specific token counts instead of epochs
+
+optimizer:
+  name: "LOZO" # Can be LOZO or LOZOM
+  kwargs:
+    lr: 1.0e-5
+    eps: 1.0e-3
+    r: 4
+    nu: 50
+
+hub:
+  push_to_hub: false
+  repo_id: "Nbiescas/lozo-generative-qwen-banking77"
