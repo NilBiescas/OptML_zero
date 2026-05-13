@@ -180,10 +180,10 @@ def main():
                 batch = {k: v.to(accelerator.device) for k, v in batch.items()}
                 
                 def closure():
-                    with torch.no_grad():
-                        outputs = model(**batch)
-                        loss = outputs.loss
-                    # Average loss across all processes
+                    outputs = model(**batch)
+                    loss = outputs.loss
+                    # Mathematically critical for distributed ZO: Average loss across all processes
+                    # so that all GPUs compute the identical gradient estimation and weights do not diverge!
                     avg_loss = accelerator.reduce(loss.detach(), reduction="mean")
                     return avg_loss
                 
@@ -208,10 +208,9 @@ def main():
             # Calculate throughput based on the actual local batch size
             local_bsz = batch["labels"].size(0)
             
-            # Count only actual non-padded tokens using the attention mask
+            # Simple, deterministic token counting (avoiding cross-process sync overhead)
             step_tokens = batch["attention_mask"].sum().item()
-            # Sum across all active processes/GPUs
-            step_tokens = int(accelerator.reduce(torch.tensor(step_tokens, device=accelerator.device), reduction="sum").item())
+            step_tokens *= accelerator.num_processes
             total_tokens_seen += step_tokens
             
             samples_per_second = (local_bsz * accelerator.num_processes) / step_time
@@ -244,8 +243,8 @@ def main():
             total_eval_loss = 0
             with torch.no_grad():
                 for batch in eval_dataloader:
-                    if is_zeroth_order:
-                        batch = {k: v.to(accelerator.device) for k, v in batch.items()}
+                    # Move batch to device for both ZO and first-order runs to ensure no device mismatch fragility
+                    batch = {k: v.to(accelerator.device) for k, v in batch.items()}
                         
                     outputs = model(**batch)
                     eval_loss = outputs.loss
@@ -272,6 +271,7 @@ def main():
             }, step=global_step)
             
             if accelerator.is_local_main_process:
+                unwrapped_model = accelerator.unwrap_model(model)
                 if accuracy > best_eval_accuracy:
                     best_eval_accuracy = accuracy
                     accelerator.print(f"New best accuracy ({accuracy:.4f})! Saving to local 'best_checkpoint' folder...")
