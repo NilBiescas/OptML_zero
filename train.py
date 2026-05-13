@@ -108,28 +108,30 @@ def main():
         
     # 2. Tokenize the formatted text
     def tokenize_function(examples):
-        return tokenizer(examples["formatted_text"], truncation=True, max_length=128)
+        # We also need to keep answer_start to use it in add_labels
+        tokenized = tokenizer(examples["formatted_text"], truncation=True, max_length=128)
+        tokenized["answer_start"] = examples["answer_start"]
+        return tokenized
         
     with accelerator.main_process_first():
         tokenized_datasets = formatted_dataset.map(
             tokenize_function, 
             batched=True, 
-            remove_columns=["formatted_text", "answer_start"]
+            remove_columns=["formatted_text"]
         )
         
     # 3. Add labels and mask the prompt tokens with -100
-    # Re-map to ensure answer_start is available for labeling
-    def add_labels_with_answer_start(example, idx):
-        # We need the answer_start from the original formatted_dataset
-        answer_start = formatted_dataset[idx]["answer_start"]
+    def add_labels(example):
         input_ids = example["input_ids"]
         labels = list(input_ids)
+        answer_start = example["answer_start"]
         for i in range(min(answer_start, len(labels))):
             labels[i] = -100
+        # Remove answer_start as it's no longer needed
         return {"labels": labels}
         
     with accelerator.main_process_first():
-        tokenized_datasets = tokenized_datasets.map(add_labels_with_answer_start, with_indices=True)
+        tokenized_datasets = tokenized_datasets.map(add_labels, remove_columns=["answer_start"])
         tokenized_datasets.set_format("torch")
         
         # Dynamically split 'train' to create a validation split if not present (to leave 'test' untouched for final evaluation!)
