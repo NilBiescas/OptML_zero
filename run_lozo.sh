@@ -40,7 +40,7 @@ git pull --ff-only || echo "git pull failed (or repo offline) — continuing wit
 
 echo ">>> Installing dependencies for LOZO"
 # Ensure we have the required packages for the new training script
-pip install "transformers==4.46.2" "datasets==3.1.0" accelerate evaluate pyyaml
+pip install --upgrade transformers datasets accelerate evaluate pyyaml
 
 echo ">>> Starting LOZO training (config.yaml)"
 # We use accelerate to launch across the 4 GPUs
