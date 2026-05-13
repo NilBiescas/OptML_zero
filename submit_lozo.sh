@@ -31,7 +31,8 @@ runai submit \
   --environment WANDB_API_KEY="${WANDB_API_KEY}" \
   --environment HF_TOKEN="${HF_TOKEN:-}" \
   --environment RUN_NAME="${JOB_NAME}" \
-  --command -- bash -c "git clone https://github.com/NilBiescas/OptML_zero.git && cd OptML_zero && bash run_lozo.sh"
+  --environment GITHUB_TOKEN="${GITHUB_TOKEN:-}" \
+  --command -- bash -c 'git clone https://${GITHUB_TOKEN}@github.com/NilBiescas/OptML_zero.git && cd OptML_zero && bash run_lozo.sh'
 
 cat <<EOF
 
