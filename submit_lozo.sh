@@ -1,5 +1,5 @@
 #!/bin/bash
-# Preemptible 4-GPU job that runs the LOZO training.
+# Preemptible 4-GPU job that runs generative causal language modeling LOZO training.
 #
 # Usage:
 #   ./submit_lozo.sh
@@ -10,15 +10,16 @@ GASPAR="nil"
 
 GPUS=4
 NODE="${NODE:-a100-40g}"
-JOB_NAME="${GASPAR}-lozo-$(date +%H%M%S)"
+JOB_NAME="${GASPAR}-causal-$(date +%H%M%S)"
 PROJECT="vilab-${GASPAR}"
 IMAGE="registry.rcp.epfl.ch/course-cs-552/base-vllm:v1"
+
 # Source environment variables
 if [ -f .env ]; then
     export $(grep -v '^#' .env | xargs)
 fi
 
-echo ">>> Submitting ${JOB_NAME} (${GPUS} GPUs, preemptible training job)"
+echo ">>> Submitting ${JOB_NAME} (${GPUS} GPUs, preemptible causal training job)"
 
 runai submit \
   --name "${JOB_NAME}" \

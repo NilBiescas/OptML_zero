@@ -1,8 +1,8 @@
 #!/bin/bash
-# Preemptible 4-GPU job that runs generative causal language modeling LOZO training.
+# Preemptible 4-GPU job that runs the LOZO training.
 #
 # Usage:
-#   ./submit_causal.sh
+#   ./submit_lozo.sh
 
 set -euo pipefail
 
@@ -10,16 +10,15 @@ GASPAR="nil"
 
 GPUS=4
 NODE="${NODE:-a100-40g}"
-JOB_NAME="${GASPAR}-causal-$(date +%H%M%S)"
+JOB_NAME="${GASPAR}-lozo-$(date +%H%M%S)"
 PROJECT="vilab-${GASPAR}"
 IMAGE="registry.rcp.epfl.ch/course-cs-552/base-vllm:v1"
-
 # Source environment variables
 if [ -f .env ]; then
     export $(grep -v '^#' .env | xargs)
 fi
 
-echo ">>> Submitting ${JOB_NAME} (${GPUS} GPUs, preemptible causal training job)"
+echo ">>> Submitting ${JOB_NAME} (${GPUS} GPUs, preemptible training job)"
 
 runai submit \
   --name "${JOB_NAME}" \
@@ -33,7 +32,7 @@ runai submit \
   --environment HF_TOKEN="${HF_TOKEN:-}" \
   --environment RUN_NAME="${JOB_NAME}" \
   --environment GITHUB_TOKEN="${GITHUB_TOKEN:-}" \
-  --command -- bash -c 'git clone https://${GITHUB_TOKEN}@github.com/NilBiescas/OptML_zero.git && cd OptML_zero && bash run_causal.sh'
+  --command -- bash -c 'git clone https://${GITHUB_TOKEN}@github.com/NilBiescas/OptML_zero.git && cd OptML_zero && bash classificationhead/run_lozo.sh'
 
 cat <<EOF
 
