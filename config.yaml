@@ -1,11 +1,12 @@
 dataset:
-  name: "PolyAI/banking77"
+  name: "mteb/banking77"
   text_column: "text"
   label_column: "label"
 
 model:
   name: "Qwen/Qwen3.5-0.8B"
   num_labels: 77
+  freeze_backbone: false # Set to true to freeze the backbone and train only the classification head
 
 training:
   epochs: 3

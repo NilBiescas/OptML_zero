@@ -4,7 +4,7 @@ import argparse
 import torch
 import time
 from datasets import load_dataset
-from transformers import AutoTokenizer, AutoModelForSequenceClassification, set_seed
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, set_seed, DataCollatorWithPadding
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -67,22 +67,26 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     
+    # We do not pad to max_length here. We truncate to 128 and use dynamic padding.
     def tokenize_function(examples):
-        return tokenizer(examples[text_col], padding="max_length", truncation=True, max_length=128)
+        return tokenizer(examples[text_col], truncation=True, max_length=128)
     
     with accelerator.main_process_first():
         tokenized_datasets = dataset.map(tokenize_function, batched=True, remove_columns=[text_col])
         tokenized_datasets.set_format("torch")
         
-        # Ensure label column is named 'labels' if it's not already
-        if label_col != 'label' and label_col in tokenized_datasets['train'].column_names:
-            tokenized_datasets = tokenized_datasets.rename_column(label_col, 'label')
+        # Rename label column to plural 'labels' to follow Hugging Face conventions perfectly
+        if label_col in tokenized_datasets['train'].column_names:
+            tokenized_datasets = tokenized_datasets.rename_column(label_col, 'labels')
             
-    train_dataloader = DataLoader(tokenized_datasets["train"], shuffle=True, batch_size=batch_size)
+    # Use DataCollatorWithPadding for dynamic padding (makes training up to 4x faster!)
+    data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
+    
+    train_dataloader = DataLoader(tokenized_datasets["train"], shuffle=True, batch_size=batch_size, collate_fn=data_collator)
     if "test" in tokenized_datasets:
-        eval_dataloader = DataLoader(tokenized_datasets["test"], batch_size=batch_size)
+        eval_dataloader = DataLoader(tokenized_datasets["test"], batch_size=batch_size, collate_fn=data_collator)
     elif "validation" in tokenized_datasets:
-        eval_dataloader = DataLoader(tokenized_datasets["validation"], batch_size=batch_size)
+        eval_dataloader = DataLoader(tokenized_datasets["validation"], batch_size=batch_size, collate_fn=data_collator)
     else:
         eval_dataloader = None
         
@@ -92,7 +96,7 @@ def main():
         for i in range(3):
             sample = tokenized_datasets["train"][i]
             input_ids = sample["input_ids"]
-            label = sample["label"]
+            label = sample["labels"]
             decoded_text = tokenizer.decode(input_ids, skip_special_tokens=True)
             
             accelerator.print(f"Example {i+1}:")
@@ -103,6 +107,19 @@ def main():
     
     model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=num_labels, trust_remote_code=True)
     model.config.pad_token_id = tokenizer.pad_token_id
+    
+    # Optional: freeze the model backbone to train only the classification head
+    freeze_backbone = model_config.get('freeze_backbone', False)
+    if freeze_backbone:
+        accelerator.print("Freezing model backbone parameters. Only training classification head.")
+        base_model = getattr(model, "base_model", getattr(model, "model", None))
+        if base_model:
+            for param in base_model.parameters():
+                param.requires_grad = False
+        else:
+            for name, param in model.named_parameters():
+                if "score" not in name and "classifier" not in name:
+                    param.requires_grad = False
     
     opt_name = opt_config.get('name', 'LOZO')
     opt_kwargs = opt_config.get('kwargs', {})
@@ -149,7 +166,10 @@ def main():
         if max_tokens is None and epoch >= epochs:
             break
             
-        model.train()
+        if is_zeroth_order:
+            model.eval() # Disable dropout and stochastic noise for clean Zeroth-Order gradient estimates
+        else:
+            model.train()
         total_loss = 0
         
         progress_bar = tqdm(train_dataloader, disable=not accelerator.is_local_main_process)
@@ -160,8 +180,9 @@ def main():
                 batch = {k: v.to(accelerator.device) for k, v in batch.items()}
                 
                 def closure():
-                    outputs = model(**batch)
-                    loss = outputs.loss
+                    with torch.no_grad():
+                        outputs = model(**batch)
+                        loss = outputs.loss
                     # Average loss across all processes
                     avg_loss = accelerator.reduce(loss.detach(), reduction="mean")
                     return avg_loss
@@ -185,9 +206,12 @@ def main():
             
             step_time = time.time() - step_start_time
             # Calculate throughput based on the actual local batch size
-            local_bsz = batch["label"].size(0)
-            seq_len = batch["input_ids"].size(1)
-            step_tokens = local_bsz * seq_len * accelerator.num_processes
+            local_bsz = batch["labels"].size(0)
+            
+            # Count only actual non-padded tokens using the attention mask
+            step_tokens = batch["attention_mask"].sum().item()
+            # Sum across all active processes/GPUs
+            step_tokens = int(accelerator.reduce(torch.tensor(step_tokens, device=accelerator.device), reduction="sum").item())
             total_tokens_seen += step_tokens
             
             samples_per_second = (local_bsz * accelerator.num_processes) / step_time
@@ -222,16 +246,13 @@ def main():
                 for batch in eval_dataloader:
                     if is_zeroth_order:
                         batch = {k: v.to(accelerator.device) for k, v in batch.items()}
-                        unwrapped_model = model
-                    else:
-                        unwrapped_model = accelerator.unwrap_model(model)
                         
-                    outputs = unwrapped_model(**batch)
+                    outputs = model(**batch)
                     eval_loss = outputs.loss
                     predictions = outputs.logits.argmax(dim=-1)
                     
                     # Gather predictions across devices
-                    predictions, labels = accelerator.gather_for_metrics((predictions, batch["label"]))
+                    predictions, labels = accelerator.gather_for_metrics((predictions, batch["labels"]))
                     avg_loss = accelerator.reduce(eval_loss.detach(), reduction="mean")
                     
                     correct += (predictions == labels).sum().item()
