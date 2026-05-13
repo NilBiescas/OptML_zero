@@ -458,7 +458,6 @@ def main():
             "test_token_accuracy": test_token_acc
         }, step=global_step)
         
-    accelerator.end_training()
     accelerator.wait_for_everyone()
     
     if push_to_hub and repo_id and accelerator.is_local_main_process:
@@ -482,6 +481,8 @@ def main():
                 commit_message="Upload last causal checkpoint"
             )
         accelerator.print("Push complete.")
+        
+    accelerator.end_training()
 
 if __name__ == "__main__":
     main()
