@@ -31,6 +31,7 @@ runai submit \
   --environment HF_HUB_ENABLE_HF_TRANSFER=1 \
   --environment WANDB_API_KEY="${WANDB_API_KEY}" \
   --environment HF_TOKEN="${HF_TOKEN:-}" \
+  --environment RUN_NAME="${JOB_NAME}" \
   --command -- bash "run_lozo.sh"
 
 cat <<EOF

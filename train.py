@@ -38,7 +38,14 @@ def main():
     
     # Initialize accelerator
     accelerator = Accelerator(log_with="wandb")
-    accelerator.init_trackers(project_name="lozo-training", config=config)
+    
+    # Try to set the WandB run name to match the RunAI job name
+    run_name = os.environ.get("RUN_NAME", None)
+    init_kwargs = {}
+    if run_name:
+        init_kwargs["init_kwargs"] = {"wandb": {"name": run_name}}
+        
+    accelerator.init_trackers(project_name="lozo-training", config=config, **init_kwargs)
     
     # Crucial: set seed across all processes to ensure identical weight initializations 
     # and identical U/V generations in the optimizer across all ranks.
