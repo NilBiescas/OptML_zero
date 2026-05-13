@@ -66,7 +66,7 @@ def main():
     num_labels = model_config.get('num_labels', 77)
     
     accelerator.print(f"Loading tokenizer and classification model: {model_name}...")
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     
@@ -123,8 +123,11 @@ def main():
             accelerator.print(f"  Label ID: {label.item() if hasattr(label, 'item') else label}\n")
         accelerator.print("===============================\n")
     
-    model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=num_labels, trust_remote_code=True)
+    model = AutoModelForSequenceClassification.from_pretrained(model_name, num_labels=num_labels)
     model.config.pad_token_id = tokenizer.pad_token_id
+    accelerator.print(f"Model config num_labels: {model.config.num_labels}")
+    if hasattr(model, 'num_labels'):
+        accelerator.print(f"Model num_labels: {model.num_labels}")
     
     # Optional: freeze the model backbone to train only the classification head
     freeze_backbone = model_config.get('freeze_backbone', False)
@@ -216,6 +219,9 @@ def main():
                 unwrapped_model = accelerator.unwrap_model(model)
                 step_loss_container = []
                 def closure():
+                    if global_step == 0 and accelerator.is_local_main_process:
+                        accelerator.print(f"DEBUG: labels max={batch['labels'].max().item()}, min={batch['labels'].min().item()}")
+                    
                     outputs = unwrapped_model(
                         input_ids=batch["input_ids"],
                         attention_mask=batch["attention_mask"],
