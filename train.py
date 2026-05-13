@@ -77,26 +77,26 @@ def main():
         feature = dataset["train"].features[label_col]
         if hasattr(feature, "names"):
             label_names = feature.names
-            
     # 1. Format the dataset into "User: <text>\nAssistant: <label_name>"
     def format_example(example):
         text = example[text_col]
+        # Robust label selection
         if has_label_text:
             label = str(example["label_text"])
         elif label_names is not None:
             label = str(label_names[example[label_col]])
         else:
             label = str(example[label_col])
-        
+
         prompt = f"User: {text}\nAssistant:"
         answer = f" {label}"
-        
+
         full_text = prompt + answer
-        
+
         # Tokenize the prompt to find where the assistant's answer starts
         prompt_tokenized = tokenizer(prompt, truncation=True, max_length=128)
         answer_start = len(prompt_tokenized["input_ids"])
-        
+
         return {
             "formatted_text": full_text,
             "answer_start": answer_start
