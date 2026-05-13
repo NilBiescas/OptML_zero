@@ -8,7 +8,7 @@ model:
   freeze_backbone: false # Backbone must be fully trainable for true zeroth-order capability validation
 
 training:
-  epochs: 3
+  epochs: 200
   batch_size: 64 # Maximizing A100 VRAM utilization for high-throughput zeroth-order training
   seed: 42
   #max_tokens: 100000 # Uncomment to train for specific token counts instead of epochs
@@ -16,7 +16,7 @@ training:
 optimizer:
   name: "LOZO" # Can be LOZO or LOZOM
   kwargs:
-    lr: 1.0e-5
+    lr: 1.0e-4
     eps: 1.0e-3
     r: 4
     nu: 50
