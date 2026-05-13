@@ -367,8 +367,9 @@ def main():
                 tokenizer.save_pretrained("last_checkpoint_causal")
                 
         epoch += 1
-        if max_tokens is not None and total_tokens_seen >= max_tokens:
-            break
+        # This condition is now redundant as max_tokens logic is handled per batch step
+        # if max_tokens is not None and total_tokens_seen >= max_tokens:
+        #     break
             
     total_run_time = time.time() - run_start_time
     accelerator.print(f"Training completed in {total_run_time:.2f} seconds.")
