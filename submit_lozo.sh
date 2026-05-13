@@ -7,12 +7,11 @@
 set -euo pipefail
 
 GASPAR="nil"
-GROUP="g37"
 
 GPUS=4
 NODE="${NODE:-a100-40g}"
-JOB_NAME="cs552-${GASPAR}-${GROUP}-lozo-$(date +%H%M%S)"
-PROJECT="${GASPAR}-vilab"
+JOB_NAME="${GASPAR}-lozo-$(date +%H%M%S)"
+PROJECT="vilab-${GASPAR}"
 IMAGE="registry.rcp.epfl.ch/course-cs-552/base-vllm:v1"
 # Source environment variables
 if [ -f .env ]; then
@@ -32,7 +31,7 @@ runai submit \
   --environment WANDB_API_KEY="${WANDB_API_KEY}" \
   --environment HF_TOKEN="${HF_TOKEN:-}" \
   --environment RUN_NAME="${JOB_NAME}" \
-  --command -- bash "run_lozo.sh"
+  --command -- bash -c "git clone https://github.com/NilBiescas/OptML_zero.git && cd OptML_zero && bash run_lozo.sh"
 
 cat <<EOF
 
