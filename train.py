@@ -360,6 +360,14 @@ def main():
                     
                     correct_tokens += batch_correct.item()
                     total_tokens += batch_total.item()
+                    
+                    if eval_step_idx == 0 and accelerator.is_local_main_process and local_mask.sum() > 0:
+                        sample_preds = predictions[local_mask][:20]
+                        sample_targets = labels[local_mask][:20]
+                        pred_str = tokenizer.decode(sample_preds)
+                        target_str = tokenizer.decode(sample_targets)
+                        accelerator.print(f"\n[EVAL SANITY CHECK] Sample predictions decoded: {repr(pred_str)}")
+                        accelerator.print(f"[EVAL SANITY CHECK] Sample targets decoded:     {repr(target_str)}\n")
                         
             avg_eval_loss = total_eval_loss / len(eval_dataloader)
             perplexity = math.exp(avg_eval_loss) if avg_eval_loss < 20 else float('inf')
