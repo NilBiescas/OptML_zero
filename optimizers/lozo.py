@@ -1,16 +1,17 @@
 import torch
+import math
 from torch.optim.optimizer import Optimizer
 
 class LOZO(Optimizer):
     """
     Low-rank Zeroth-Order SGD (LOZO) optimizer.
-    Mathematically aligned 100% with the official paper:
-    "Enhancing Zeroth-order fine-tuning for language models with low-rank structures"
+    With fully synchronized multi-GPU random generators to support 
+    correct mathematical behavior across distributed nodes without DDP drift.
     """
-    def __init__(self, params, lr=1e-3, eps=1e-3, r=4, nu=50):
+    def __init__(self, params, lr=1e-3, eps=1e-3, r=4, nu=50, seed=42):
         if lr < 0.0:
             raise ValueError("Invalid learning rate: {}".format(lr))
-        defaults = dict(lr=lr, eps=eps, r=r, nu=nu)
+        defaults = dict(lr=lr, eps=eps, r=r, nu=nu, seed=seed)
         super(LOZO, self).__init__(params, defaults)
 
     @torch.no_grad()
@@ -26,6 +27,7 @@ class LOZO(Optimizer):
             raise RuntimeError("LOZO optimizer requires a closure that computes the loss")
 
         eps = self.defaults['eps']
+        seed = self.defaults.get('seed', 42)
         
         # 1. Apply perturbation for F+
         for group in self.param_groups:
@@ -39,21 +41,31 @@ class LOZO(Optimizer):
                 if len(state) == 0:
                     state['step'] = 0
                 
+                # Assign a unique parameter ID to guarantee distinct random sequences for distinct layers
+                if 'param_id' not in state:
+                    state['param_id'] = len(self.state)
+                
+                # Deterministic seed combining base seed, parameter ID, and step number
+                # ensures perfect alignment across different GPU processes
+                param_seed = seed + state['step'] + state['param_id'] * 1000003
+                generator = torch.Generator(device=p.device)
+                generator.manual_seed(param_seed)
+                
                 if p.dim() >= 2:
                     if state['step'] % nu == 0:
                         # Resample V_l
                         V_dim = p.numel() // p.size(0)
-                        state['V'] = torch.randn(V_dim, r, dtype=p.dtype).to(p.device)
+                        state['V'] = torch.randn(V_dim, r, dtype=p.dtype, device=p.device, generator=generator)
                     
                     # Sample U_l
-                    state['U'] = torch.randn(p.size(0), r, dtype=p.dtype).to(p.device)
+                    state['U'] = torch.randn(p.size(0), r, dtype=p.dtype, device=p.device, generator=generator)
                     
                     # Perturb X_l <- X_l + eps * U_l V_l^T
                     p_view = p.view(p.size(0), -1)
                     p_view.addmm_(state['U'], state['V'].T, alpha=eps, beta=1.0)
                 else:
                     # 1D parameters (bias, LayerNorm): fall back to standard MeZO perturbation
-                    state['Z'] = torch.randn_like(p)
+                    state['Z'] = torch.randn(p.size(), dtype=p.dtype, device=p.device, generator=generator)
                     p.add_(state['Z'], alpha=eps)
         
         # Calculate F+
@@ -86,6 +98,7 @@ class LOZO(Optimizer):
         
         for group in self.param_groups:
             lr = group['lr']
+            r = group['r']
             for p in group['params']:
                 if not p.requires_grad:
                     continue
@@ -93,8 +106,8 @@ class LOZO(Optimizer):
                 state = self.state[p]
                 
                 if p.dim() >= 2:
-                    # Reset to original X_l and update X_l <- X_l - lr * c * U_l V_l^T
-                    net_alpha = eps - (lr * c)
+                    # Reset to original X_l and update X_l <- X_l - lr * c * U_l V_l^T / r
+                    net_alpha = eps - (lr * c / r)
                     p_view = p.view(p.size(0), -1)
                     p_view.addmm_(state['U'], state['V'].T, alpha=net_alpha, beta=1.0)
                 else:
@@ -109,13 +122,13 @@ class LOZO(Optimizer):
 class LOZOM(Optimizer):
     """
     Low-rank Zeroth-Order SGD with Momentum (LOZO-M) optimizer.
-    Mathematically aligned 100% with the official paper:
-    "Enhancing Zeroth-order fine-tuning for language models with low-rank structures"
+    With fully synchronized multi-GPU random generators to support
+    correct mathematical behavior across distributed nodes without DDP drift.
     """
-    def __init__(self, params, lr=1e-3, eps=1e-3, r=4, nu=50, beta=0.9):
+    def __init__(self, params, lr=1e-3, eps=1e-3, r=4, nu=50, beta=0.9, seed=42):
         if lr < 0.0:
             raise ValueError("Invalid learning rate: {}".format(lr))
-        defaults = dict(lr=lr, eps=eps, r=r, nu=nu, beta=beta)
+        defaults = dict(lr=lr, eps=eps, r=r, nu=nu, beta=beta, seed=seed)
         super(LOZOM, self).__init__(params, defaults)
 
     @torch.no_grad()
@@ -131,6 +144,7 @@ class LOZOM(Optimizer):
             raise RuntimeError("LOZOM optimizer requires a closure that computes the loss")
 
         eps = self.defaults['eps']
+        seed = self.defaults.get('seed', 42)
         
         # 1. Apply perturbation for F+
         for group in self.param_groups:
@@ -148,28 +162,40 @@ class LOZOM(Optimizer):
                     else:
                         state['N_1d'] = torch.zeros_like(p)
                 
+                # Assign a unique parameter ID to guarantee distinct random sequences for distinct layers
+                if 'param_id' not in state:
+                    state['param_id'] = len(self.state)
+                
+                # Deterministic seed combining base seed, parameter ID, and step number
+                # ensures perfect alignment across different GPU processes
+                param_seed = seed + state['step'] + state['param_id'] * 1000003
+                generator = torch.Generator(device=p.device)
+                generator.manual_seed(param_seed)
+                
                 if p.dim() >= 2:
                     if state['step'] % nu == 0:
                         V_dim = p.numel() // p.size(0)
                         if 'V' in state:
                             V_old = state['V']
-                            V_new = torch.randn(V_dim, r, dtype=p.dtype).to(p.device)
+                            # Generate new V using the synchronized generator
+                            V_new = torch.randn(V_dim, r, dtype=p.dtype, device=p.device, generator=generator)
                             
-                            # Project momentum onto the new subspace: N = N_old @ (V_old.T @ V_new) / V_dim
-                            state['N'] = (state['N'] @ (V_old.T @ V_new)) / V_dim
+                            # Project momentum onto the new subspace: N = N_old @ (V_old.T @ V_new) / sqrt(V_dim)
+                            # Using sqrt(V_dim) mathematically preserves momentum scale, avoiding collapse!
+                            state['N'] = (state['N'] @ (V_old.T @ V_new)) / math.sqrt(V_dim)
                             state['V'] = V_new
                         else:
-                            state['V'] = torch.randn(V_dim, r, dtype=p.dtype).to(p.device)
+                            state['V'] = torch.randn(V_dim, r, dtype=p.dtype, device=p.device, generator=generator)
                     
-                    # Sample U_l
-                    state['U'] = torch.randn(p.size(0), r, dtype=p.dtype).to(p.device)
+                    # Sample U_l using the synchronized generator
+                    state['U'] = torch.randn(p.size(0), r, dtype=p.dtype, device=p.device, generator=generator)
                     
                     # Perturb X_l <- X_l + eps * U_l V_l^T
                     p_view = p.view(p.size(0), -1)
                     p_view.addmm_(state['U'], state['V'].T, alpha=eps, beta=1.0)
                 else:
-                    # 1D parameters: fall back to standard MeZO perturbation
-                    state['Z'] = torch.randn_like(p)
+                    # 1D parameters: fall back to standard MeZO perturbation using the synchronized generator
+                    state['Z'] = torch.randn(p.size(), dtype=p.dtype, device=p.device, generator=generator)
                     p.add_(state['Z'], alpha=eps)
         
         # Calculate F+
@@ -203,6 +229,7 @@ class LOZOM(Optimizer):
         for group in self.param_groups:
             lr = group['lr']
             beta = group['beta']
+            r = group['r']
             for p in group['params']:
                 if not p.requires_grad:
                     continue
@@ -217,8 +244,8 @@ class LOZOM(Optimizer):
                     # Update momentum: N_l = beta * N_l + (1 - beta) * c * U_l
                     state['N'].mul_(beta).add_(state['U'], alpha=(1 - beta) * c)
                     
-                    # Update X_l <- X_l - lr * N_l V_l^T
-                    p_view.addmm_(state['N'], state['V'].T, alpha=-lr, beta=1.0)
+                    # Update X_l <- X_l - lr * N_l V_l^T / r
+                    p_view.addmm_(state['N'], state['V'].T, alpha=-lr / r, beta=1.0)
                 else:
                     # Reset to original X_l
                     p.add_(state['Z'], alpha=eps)
