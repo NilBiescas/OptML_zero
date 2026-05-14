@@ -63,7 +63,16 @@ def main():
     dataset = load_dataset(dataset_name)
     
     model_name = model_config.get('name', 'Qwen/Qwen3.5-0.8B')
-    num_labels = model_config.get('num_labels', 77)
+    
+    # Robustly map labels from the dataset to ensure they are [0, num_labels-1]
+    raw_labels = dataset["train"][label_col]
+    unique_labels = sorted(set(raw_labels))
+
+    label2id = {label: idx for idx, label in enumerate(unique_labels)}
+    id2label = {idx: str(label) for label, idx in label2id.items()}
+
+    num_labels = len(unique_labels)
+    accelerator.print(f"Detected {num_labels} unique labels in the dataset.")
     
     accelerator.print(f"Loading tokenizer and classification model: {model_name}...")
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -72,17 +81,15 @@ def main():
     
     # We do not pad to max_length here. We truncate to 128 and use dynamic padding.
     def tokenize_function(examples):
-        return tokenizer(examples[text_col], truncation=True, max_length=128)
+        tokenized = tokenizer(examples[text_col], truncation=True, max_length=128)
+        tokenized["labels"] = [label2id[label] for label in examples[label_col]]
+        return tokenized
     
     accelerator.print("Tokenizing dataset...")
     with accelerator.main_process_first():
-        remove_cols = [col for col in dataset["train"].column_names if col != label_col]
+        remove_cols = dataset["train"].column_names
         tokenized_datasets = dataset.map(tokenize_function, batched=True, remove_columns=remove_cols)
         tokenized_datasets.set_format("torch")
-        
-        # Rename label column to plural 'labels' to follow Hugging Face conventions perfectly
-        if label_col in tokenized_datasets['train'].column_names:
-            tokenized_datasets = tokenized_datasets.rename_column(label_col, 'labels')
             
         # Dynamically split 'train' to create a validation split if not present
         if "test" in tokenized_datasets and "validation" not in tokenized_datasets:
@@ -108,6 +115,17 @@ def main():
     else:
         test_dataloader = None
         
+    if accelerator.is_local_main_process:
+        all_labels = []
+        for split in tokenized_datasets.keys():
+            labels = tokenized_datasets[split]["labels"]
+            if isinstance(labels, torch.Tensor):
+                labels = labels.tolist()
+            all_labels.extend(labels)
+        accelerator.print(f"GLOBAL MIN LABEL: {min(all_labels)}")
+        accelerator.print(f"GLOBAL MAX LABEL: {max(all_labels)}")
+        accelerator.print(f"NUM UNIQUE LABELS: {len(set(all_labels))}")
+
     # Print a few tokenized examples to verify what is going into the model
     if accelerator.is_local_main_process:
         accelerator.print("\n=== Sample Tokenized Inputs ===")
@@ -124,10 +142,10 @@ def main():
         accelerator.print("===============================\n")
     
     from transformers import AutoConfig
-    config = AutoConfig.from_pretrained(model_name)
-    config.num_labels = num_labels
+    hf_config = AutoConfig.from_pretrained(model_name)
+    hf_config.num_labels = num_labels
     
-    model = AutoModelForSequenceClassification.from_pretrained(model_name, config=config)
+    model = AutoModelForSequenceClassification.from_pretrained(model_name, config=hf_config)
     model.config.pad_token_id = tokenizer.pad_token_id
     accelerator.print(f"Model config num_labels: {model.config.num_labels}")
     if hasattr(model, 'num_labels'):
@@ -232,13 +250,17 @@ def main():
                         labels=batch["labels"]
                     )
                     loss = outputs.loss
-                    # Distributed reduction for multi-GPU ZO gradient consistency
-                    avg_loss = accelerator.reduce(loss.detach(), reduction="mean")
-                    step_loss_container.append(avg_loss.item())
-                    return avg_loss
+                    step_loss_container.append(loss.detach())
+                    return loss
                     
                 optimizer.step(closure)
-                loss = step_loss_container[0] if len(step_loss_container) > 0 else 0.0
+                
+                # Perform distributed reduction OUTSIDE the closure to avoid deadlocks
+                if len(step_loss_container) > 0:
+                    loss_tensor = accelerator.reduce(step_loss_container[0], reduction="mean")
+                    loss = loss_tensor.item()
+                else:
+                    loss = 0.0
                 total_loss += loss
                 progress_bar.set_description(f"Epoch {epoch+1} Loss: {loss:.4f}")
                 train_loss_val = loss
