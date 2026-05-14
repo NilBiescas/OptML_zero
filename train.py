@@ -65,10 +65,11 @@ def main():
     
     # Try to set the WandB run name to match the RunAI job name
     run_name = os.environ.get("RUN_NAME", None)
-    init_kwargs = {}
+    wandb_kwargs = {"entity": "nilbiescas3"}
     if run_name:
-        init_kwargs["init_kwargs"] = {"wandb": {"name": run_name}}
-        
+        wandb_kwargs["name"] = run_name
+    init_kwargs = {"init_kwargs": {"wandb": wandb_kwargs}}
+
     accelerator.init_trackers(project_name="lozo-generative-training", config=config, **init_kwargs)
     
     # --- Preemption resume: pull last checkpoint from HF Hub before anything else ---
