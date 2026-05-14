@@ -18,3 +18,4 @@ last_checkpoint/
 # Output runs
 runs/
 LOZO/
+.deploy_keys/

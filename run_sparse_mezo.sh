@@ -31,7 +31,7 @@ EOF
 fi
 
 echo ">>> git pull in $(pwd)"
-git pull --ff-only || echo "git pull failed (or repo offline) — continuing with current files"
+GIT_SSH_COMMAND="ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes" git pull --ff-only || echo "git pull failed (or repo offline) — continuing with current files"
 
 echo ">>> Installing dependencies"
 pip install --upgrade transformers datasets accelerate evaluate pyyaml
