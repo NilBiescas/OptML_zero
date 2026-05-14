@@ -5,7 +5,7 @@ import torch
 import time
 import math
 from datasets import load_dataset, DatasetDict
-from transformers import AutoTokenizer, AutoModelForCausalLM, set_seed, DataCollatorForSeq2Seq
+from transformers import AutoTokenizer, AutoModelForCausalLM, set_seed, DataCollatorForSeq2Seq, get_scheduler
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -223,6 +223,28 @@ def main():
         if test_dataloader:
             test_dataloader = accelerator.prepare(test_dataloader)
             
+        # Scheduler setup (Optional)
+        lr_scheduler = None
+        if 'lr_scheduler' in train_config:
+            scheduler_config = train_config.get('lr_scheduler', {})
+            scheduler_type = scheduler_config.get('type', 'linear')
+            warmup_ratio = scheduler_config.get('warmup_ratio', 0.0)
+            warmup_steps = scheduler_config.get('warmup_steps', 0)
+            
+            num_training_steps = len(train_dataloader) * epochs
+            if warmup_steps == 0 and warmup_ratio > 0:
+                num_warmup_steps = int(num_training_steps * warmup_ratio)
+            else:
+                num_warmup_steps = warmup_steps
+                
+            lr_scheduler = get_scheduler(
+                name=scheduler_type,
+                optimizer=optimizer,
+                num_warmup_steps=num_warmup_steps,
+                num_training_steps=num_training_steps,
+            )
+            lr_scheduler = accelerator.prepare(lr_scheduler)
+            
     accelerator.print(f"Starting training for {epochs} epochs using {opt_name} optimizer")
     
     global_step = 0
@@ -293,6 +315,8 @@ def main():
                 progress_bar.set_description(f"Epoch {epoch+1} Loss: {loss.item():.4f}")
                 train_loss_val = loss.item()
                 
+            if lr_scheduler is not None:
+                lr_scheduler.step()
             step_time = time.time() - step_start_time
             local_bsz = batch["labels"].size(0)
             
@@ -305,6 +329,7 @@ def main():
             
             log_metrics = {
                 "train_loss": train_loss_val,
+                "learning_rate": optimizer.param_groups[0]['lr'],
                 "step_time_sec": step_time,
                 "samples_per_second": samples_per_second,
                 "total_tokens_seen": total_tokens_seen

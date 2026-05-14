@@ -4,7 +4,7 @@ import argparse
 import torch
 import time
 from datasets import load_dataset, DatasetDict
-from transformers import AutoTokenizer, AutoModelForSequenceClassification, set_seed, DataCollatorWithPadding
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, set_seed, DataCollatorWithPadding, get_scheduler
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -246,10 +246,50 @@ def main():
             optimizer = LOZO(model.parameters(), **opt_kwargs)
             
         optimizer, train_dataloader = accelerator.prepare(optimizer, train_dataloader)
-        if eval_dataloader:
-            eval_dataloader = accelerator.prepare(eval_dataloader)
         if test_dataloader:
             test_dataloader = accelerator.prepare(test_dataloader)
+            
+        # Scheduler setup (Optional)
+        lr_scheduler = None
+        if 'lr_scheduler' in train_config:
+            scheduler_config = train_config.get('lr_scheduler', {})
+            scheduler_type = scheduler_config.get('type', 'linear')
+            warmup_ratio = scheduler_config.get('warmup_ratio', 0.0)
+            warmup_steps = scheduler_config.get('warmup_steps', 0)
+            start_lr = scheduler_config.get('start_lr', 0.0)
+            
+            if max_tokens is not None:
+                # Estimate steps if max_tokens is used (approximation)
+                avg_tokens_per_batch = 128 
+                num_training_steps = max_tokens // (avg_tokens_per_batch * accelerator.num_processes)
+            else:
+                num_training_steps = len(train_dataloader) * epochs
+            if warmup_steps == 0 and warmup_ratio > 0:
+                num_warmup_steps = int(num_training_steps * warmup_ratio)
+            else:
+                num_warmup_steps = warmup_steps
+    
+            if start_lr > 0:
+                peak_lr = opt_config.get('kwargs', {}).get('lr', 1e-6)
+                import math # Ensure math is available for cosine
+                def lr_lambda(current_step):
+                    if current_step < num_warmup_steps:
+                        return (start_lr + (peak_lr - start_lr) * float(current_step) / float(max(1, num_warmup_steps))) / peak_lr
+                    if scheduler_type == "linear":
+                        return max(0.0, float(num_training_steps - current_step) / float(max(1, num_training_steps - num_warmup_steps)))
+                    elif scheduler_type == "cosine":
+                        progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
+                        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
+                    return 1.0
+                lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+            else:
+                lr_scheduler = get_scheduler(
+                    name=scheduler_type,
+                    optimizer=optimizer,
+                    num_warmup_steps=num_warmup_steps,
+                    num_training_steps=num_training_steps,
+                )
+            lr_scheduler = accelerator.prepare(lr_scheduler)
     else:
         # Standard first-order optimizer
         if hasattr(torch.optim, opt_name):
@@ -263,6 +303,33 @@ def main():
             eval_dataloader = accelerator.prepare(eval_dataloader)
         if test_dataloader:
             test_dataloader = accelerator.prepare(test_dataloader)
+            
+        # Scheduler setup (Optional)
+        lr_scheduler = None
+        if 'lr_scheduler' in train_config:
+            scheduler_config = train_config.get('lr_scheduler', {})
+            scheduler_type = scheduler_config.get('type', 'linear')
+            warmup_ratio = scheduler_config.get('warmup_ratio', 0.0)
+            warmup_steps = scheduler_config.get('warmup_steps', 0)
+            
+            if max_tokens is not None:
+                # Estimate steps if max_tokens is used (approximation)
+                avg_tokens_per_batch = 128 
+                num_training_steps = max_tokens // (avg_tokens_per_batch * accelerator.num_processes)
+            else:
+                num_training_steps = len(train_dataloader) * epochs
+            if warmup_steps == 0 and warmup_ratio > 0:
+                num_warmup_steps = int(num_training_steps * warmup_ratio)
+            else:
+                num_warmup_steps = warmup_steps
+                
+            lr_scheduler = get_scheduler(
+                name=scheduler_type,
+                optimizer=optimizer,
+                num_warmup_steps=num_warmup_steps,
+                num_training_steps=num_training_steps,
+            )
+            lr_scheduler = accelerator.prepare(lr_scheduler)
             
     accelerator.print(f"Starting training for {epochs} epochs using {opt_name} optimizer")
     
@@ -335,6 +402,8 @@ def main():
                 progress_bar.set_description(f"Epoch {epoch+1} Loss: {loss.item():.4f}")
                 train_loss_val = loss.item()
                 
+            if lr_scheduler is not None:
+                lr_scheduler.step()
             step_time = time.time() - step_start_time
             local_bsz = batch["labels"].size(0)
             
@@ -347,6 +416,7 @@ def main():
             
             log_metrics = {
                 "train_loss": train_loss_val,
+                "learning_rate": optimizer.param_groups[0]['lr'],
                 "step_time_sec": step_time,
                 "samples_per_second": samples_per_second,
                 "total_tokens_seen": total_tokens_seen
