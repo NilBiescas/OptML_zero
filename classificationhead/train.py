@@ -34,6 +34,7 @@ def main():
     seed = train_config.get('seed', 42)
     batch_size = train_config.get('batch_size', 16)
     epochs = train_config.get('epochs', 3)
+    eval_epochs = train_config.get('eval_epochs', 1)
     max_tokens = train_config.get('max_tokens', None)
     
     # Initialize accelerator
@@ -364,7 +365,7 @@ def main():
         accelerator.print(f"Epoch {epoch+1} finished. Avg train loss: {avg_train_loss:.4f} | Total tokens seen: {total_tokens_seen}")
         
         # Evaluation
-        if eval_dataloader:
+        if eval_dataloader and (epoch + 1) % eval_epochs == 0:
             accelerator.print(f"\n--- Starting Evaluation for Epoch {epoch+1} ---")
             model.eval()
             total_eval_loss = 0
