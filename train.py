@@ -548,7 +548,6 @@ def main():
     accelerator.wait_for_everyone()
     
     if push_to_hub and repo_id and accelerator.is_local_main_process:
-        from huggingface_hub import HfApi
         api = HfApi()
         accelerator.print(f"Pushing causal checkpoints to Hugging Face Hub: {repo_id}")
         api.create_repo(repo_id=repo_id, exist_ok=True)

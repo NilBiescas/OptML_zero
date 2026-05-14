@@ -139,11 +139,15 @@ class DiZO(Optimizer):
     @torch.no_grad()
     def _projection_step(self, closure):
         """
-        ZO-optimize scalar gamma_l for each Q/V layer, then apply:
-            theta_l = theta0_l + clip(gamma_l / ||delta_l||, 1-tau, 1+tau) * delta_l
+        ZO-optimize a per-Q/V-layer scalar ratio alpha_l (= gamma_l / ||delta_l||)
+        and apply:
+            theta_l = theta0_l + clip(alpha_l, 1-tau, 1+tau) * delta_l
 
-        gamma lives in R^L (one scalar per Q/V layer), making this ZO
-        sub-problem extremely cheap: 2*j_proj extra forward passes total.
+        Reparameterising the paper's gamma_l as the ratio alpha_l keeps the ZO
+        perturbation `eps_proj * u` on the same scale as alpha (~1), regardless
+        of how small ||delta_l|| is — without this, eps_proj=0.1 against gamma~
+        ||delta||~5e-3 makes ratio ≈ 1 ± 20, which destroys the model during
+        the closure() probes and turns c_gamma into pure noise.
         """
         eps_proj = self.defaults['eps_proj']
         j_proj   = self.defaults['j_proj']
@@ -164,12 +168,12 @@ class DiZO(Optimizer):
         device = qv_params[0].device
         dtype  = qv_params[0].dtype
 
-        # Displacement from anchor and its L2 norm per Q/V layer
+        # Displacement from anchor (kept constant during the inner ZO loop;
+        # only the per-layer scaling alpha changes).
         deltas = [p.data - self.state[p]['anchor'] for p in qv_params]
-        norms  = [d.norm().clamp(min=1e-12) for d in deltas]
 
-        # Initialise gamma so ratio = 1 (projection is identity at start)
-        gamma = torch.stack(norms).clone()  # shape [L]
+        # alpha_l = ratio gamma_l / ||delta_l||. Identity projection at start.
+        alpha = torch.ones(L, dtype=dtype, device=device)
 
         proj_gen      = torch.Generator(device=device)
         proj_seed_base = seed + self._step_count * 77777
@@ -178,38 +182,33 @@ class DiZO(Optimizer):
             proj_gen.manual_seed(proj_seed_base + j)
             u = torch.randn(L, dtype=dtype, device=device, generator=proj_gen)
 
-            # Forward perturbation on gamma: set theta = theta0 + ratio_+ * delta
+            # Forward perturbation on alpha: theta = theta0 + alpha_+ * delta
             for i, p in enumerate(qv_params):
-                ratio = (gamma[i] + eps_proj * u[i]) / norms[i]
-                p.data.copy_(self.state[p]['anchor'] + ratio * deltas[i])
+                a = (alpha[i] + eps_proj * u[i]).clamp(1.0 - tau, 1.0 + tau)
+                p.data.copy_(self.state[p]['anchor'] + a * deltas[i])
 
             l_plus = closure()
             if isinstance(l_plus, torch.Tensor):
                 l_plus = l_plus.item()
 
-            # Backward perturbation on gamma: set theta = theta0 + ratio_- * delta
+            # Backward perturbation on alpha
             for i, p in enumerate(qv_params):
-                ratio = (gamma[i] - eps_proj * u[i]) / norms[i]
-                p.data.copy_(self.state[p]['anchor'] + ratio * deltas[i])
+                a = (alpha[i] - eps_proj * u[i]).clamp(1.0 - tau, 1.0 + tau)
+                p.data.copy_(self.state[p]['anchor'] + a * deltas[i])
 
             l_minus = closure()
             if isinstance(l_minus, torch.Tensor):
                 l_minus = l_minus.item()
 
-            # Restore weights to current gamma state before updating gamma
+            # Restore weights to current alpha (so closure-side state is clean)
             for i, p in enumerate(qv_params):
-                ratio = gamma[i] / norms[i]
-                p.data.copy_(self.state[p]['anchor'] + ratio * deltas[i])
+                p.data.copy_(self.state[p]['anchor'] + alpha[i] * deltas[i])
 
-            # ZO gradient for gamma, then update + clip
-            c_gamma = (l_plus - l_minus) / (2.0 * eps_proj)
-            gamma.add_(u, alpha=-lr * c_gamma)
+            # ZO gradient on alpha, update, then clip back into [1-tau, 1+tau]
+            c_alpha = (l_plus - l_minus) / (2.0 * eps_proj)
+            alpha.add_(u, alpha=-lr * c_alpha)
+            alpha.clamp_(1.0 - tau, 1.0 + tau)
 
-            for i in range(L):
-                ratio      = (gamma[i] / norms[i]).clamp(1.0 - tau, 1.0 + tau)
-                gamma[i]   = ratio * norms[i]
-
-        # Apply final projection to the actual model weights
+        # Final projection write-back to the actual model weights
         for i, p in enumerate(qv_params):
-            final_ratio = (gamma[i] / norms[i]).clamp(1.0 - tau, 1.0 + tau)
-            p.data.copy_(self.state[p]['anchor'] + final_ratio * deltas[i])
+            p.data.copy_(self.state[p]['anchor'] + alpha[i] * deltas[i])
