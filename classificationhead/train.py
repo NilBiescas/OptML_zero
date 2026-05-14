@@ -64,16 +64,22 @@ def main():
     
     model_name = model_config.get('name', 'Qwen/Qwen3.5-0.8B')
     
+    accelerator.print(f"Dataset columns: {dataset['train'].column_names}")
+    
     # Robustly map labels from the dataset to ensure they are [0, num_labels-1]
-    raw_labels = dataset["train"][label_col]
-    # Ensure labels are treated as integers for correct sorting and mapping
-    unique_labels = sorted(set(int(x) for x in raw_labels))
+    if label_col in dataset["train"].column_names:
+        raw_labels = dataset["train"][label_col]
+        # Ensure labels are treated as integers for correct sorting and mapping
+        unique_labels = sorted(set(int(x) for x in raw_labels))
+        label2id = {label: idx for idx, label in enumerate(unique_labels)}
+        id2label = {idx: str(label) for label, idx in label2id.items()}
+        num_labels = len(unique_labels)
+    else:
+        accelerator.print(f"Warning: label column '{label_col}' not found. Falling back to config.")
+        num_labels = model_config.get('num_labels', 77)
+        label2id = None
 
-    label2id = {label: idx for idx, label in enumerate(unique_labels)}
-    id2label = {idx: str(label) for label, idx in label2id.items()}
-
-    num_labels = len(unique_labels)
-    accelerator.print(f"Detected {num_labels} unique labels in the dataset.")
+    accelerator.print(f"FINAL num_labels used for model: {num_labels}")
     
     accelerator.print(f"Loading tokenizer and classification model: {model_name}...")
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
@@ -83,8 +89,12 @@ def main():
     # We do not pad to max_length here. We truncate to 128 and use dynamic padding.
     def tokenize_function(examples):
         tokenized = tokenizer(examples[text_col], truncation=True, max_length=128)
-        # Ensure label is converted to int before mapping lookup
-        tokenized["labels"] = [label2id[int(label)] for label in examples[label_col]]
+        if label2id is not None:
+            # Ensure label is converted to int before mapping lookup
+            tokenized["labels"] = [label2id[int(label)] for label in examples[label_col]]
+        else:
+            # Fallback if no mapping exists
+            tokenized["labels"] = [int(label) for label in examples[label_col]]
         return tokenized
     
     accelerator.print("Tokenizing dataset...")
