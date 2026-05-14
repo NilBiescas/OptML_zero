@@ -66,7 +66,8 @@ def main():
     
     # Robustly map labels from the dataset to ensure they are [0, num_labels-1]
     raw_labels = dataset["train"][label_col]
-    unique_labels = sorted(set(raw_labels))
+    # Ensure labels are treated as integers for correct sorting and mapping
+    unique_labels = sorted(set(int(x) for x in raw_labels))
 
     label2id = {label: idx for idx, label in enumerate(unique_labels)}
     id2label = {idx: str(label) for label, idx in label2id.items()}
@@ -82,13 +83,24 @@ def main():
     # We do not pad to max_length here. We truncate to 128 and use dynamic padding.
     def tokenize_function(examples):
         tokenized = tokenizer(examples[text_col], truncation=True, max_length=128)
-        tokenized["labels"] = [label2id[label] for label in examples[label_col]]
+        # Ensure label is converted to int before mapping lookup
+        tokenized["labels"] = [label2id[int(label)] for label in examples[label_col]]
         return tokenized
     
     accelerator.print("Tokenizing dataset...")
     with accelerator.main_process_first():
         remove_cols = dataset["train"].column_names
-        tokenized_datasets = dataset.map(tokenize_function, batched=True, remove_columns=remove_cols)
+        tokenized_datasets = dataset.map(
+            tokenize_function, 
+            batched=True, 
+            remove_columns=remove_cols,
+            load_from_cache_file=False # Force re-mapping for debugging
+        )
+        
+        # Verify labels are 0-indexed for the first few samples
+        for i in range(min(5, len(tokenized_datasets['train']))):
+            accelerator.print(f"Sample {i} mapped label = {tokenized_datasets['train'][i]['labels']}")
+
         tokenized_datasets.set_format("torch")
             
         # Dynamically split 'train' to create a validation split if not present
