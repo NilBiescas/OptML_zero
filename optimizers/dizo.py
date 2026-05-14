@@ -31,12 +31,13 @@ class DiZO(Optimizer):
     # Covers Qwen, LLaMA, Mistral, OPT, GPT-2, Falcon, etc.
     _QV_PATTERNS = ('q_proj', 'v_proj', 'query', 'value', 'wq', 'wv')
 
-    def __init__(self, params, lr=1e-6, eps=1e-3, eps_proj=1e-1,
-                 kappa=100, tau=0.2, j_proj=5, seed=42):
+    def __init__(self, params, lr=1e-7, eps=1e-3, eps_proj=1e-1,
+                 kappa=100, tau=0.2, j_proj=5, lr_proj=1e-3, seed=42):
         if lr < 0.0:
             raise ValueError(f"Invalid learning rate: {lr}")
         defaults = dict(lr=lr, eps=eps, eps_proj=eps_proj,
-                        kappa=kappa, tau=tau, j_proj=j_proj, seed=seed)
+                        kappa=kappa, tau=tau, j_proj=j_proj,
+                        lr_proj=lr_proj, seed=seed)
         super(DiZO, self).__init__(params, defaults)
         self._step_count = 0
 
@@ -153,7 +154,8 @@ class DiZO(Optimizer):
         j_proj   = self.defaults['j_proj']
         tau      = self.defaults['tau']
         seed     = self.defaults['seed']
-        lr       = self.param_groups[0]['lr']
+        lr_proj  = self.defaults['lr_proj']  # separate from main `lr`: alpha
+                                             # lives near 1, not weight scale
 
         qv_params = [
             p
@@ -206,7 +208,7 @@ class DiZO(Optimizer):
 
             # ZO gradient on alpha, update, then clip back into [1-tau, 1+tau]
             c_alpha = (l_plus - l_minus) / (2.0 * eps_proj)
-            alpha.add_(u, alpha=-lr * c_alpha)
+            alpha.add_(u, alpha=-lr_proj * c_alpha)
             alpha.clamp_(1.0 - tau, 1.0 + tau)
 
         # Final projection write-back to the actual model weights

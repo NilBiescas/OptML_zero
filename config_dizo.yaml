@@ -16,12 +16,13 @@ training:
 optimizer:
   name: "DiZO"
   kwargs:
-    lr: 1.0e-6        # main ZO learning rate (paper: 1e-6 full-param, 1e-4 LoRA)
+    lr: 1.0e-7        # main ZO LR — full-MeZO needs 10x smaller than LOZO/SparseMeZO
     eps: 1.0e-3       # main perturbation scale
-    eps_proj: 1.0e-1  # perturbation scale for gamma ZO sub-problem (paper: 0.05–0.1)
+    eps_proj: 1.0e-1  # perturbation on alpha ratio (paper: 0.05–0.1)
     kappa: 100        # projection update interval in steps (paper: 50–400)
-    tau: 0.2          # clip gamma/||delta|| to [1-tau, 1+tau] (paper: 0.1–0.3)
+    tau: 0.2          # clip alpha to [1-tau, 1+tau] (paper: 0.1–0.3)
     j_proj: 5         # inner ZO steps per projection update
+    lr_proj: 1.0e-3   # separate LR for alpha update (alpha~1, not weight scale)
     seed: 42
 
 hub:
