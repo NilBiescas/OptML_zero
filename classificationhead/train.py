@@ -145,7 +145,13 @@ def main():
     hf_config = AutoConfig.from_pretrained(model_name)
     hf_config.num_labels = num_labels
     
-    model = AutoModelForSequenceClassification.from_pretrained(model_name, config=hf_config)
+    model = AutoModelForSequenceClassification.from_pretrained(
+                                                                model_name,
+                                                                config=hf_config,
+                                                                num_labels=num_labels,
+                                                                ignore_mismatched_sizes=True,
+                                                                trust_remote_code=True
+                                                                )
     model.config.pad_token_id = tokenizer.pad_token_id
     accelerator.print(f"Model config num_labels: {model.config.num_labels}")
     if hasattr(model, 'num_labels'):
