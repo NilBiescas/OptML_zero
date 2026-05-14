@@ -14,9 +14,13 @@ from tqdm import tqdm
 from optimizers.lozo import LOZOM, LOZO
 from optimizers.sparse_mezo import SparseMeZO
 
-RESUME_DIR = "./resume_download"
-RESUME_STATE_PATH = os.path.join(RESUME_DIR, "resume_state.json")
-RESUME_CKPT_PATH = os.path.join(RESUME_DIR, "last_checkpoint_causal")
+# CHECKPOINT_DIR points at a durable mount (a runai PVC, typically
+# /scratch/<JOB_NAME>) so that pods restarted after preemption can resume.
+# Falls back to the pod-local working directory if not set.
+CHECKPOINT_DIR = os.environ.get("CHECKPOINT_DIR", ".")
+LAST_CKPT_PATH = os.path.join(CHECKPOINT_DIR, "last_checkpoint_causal")
+BEST_CKPT_PATH = os.path.join(CHECKPOINT_DIR, "best_checkpoint_causal")
+RESUME_STATE_PATH = os.path.join(CHECKPOINT_DIR, "resume_state.json")
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Fine-tune generative model using config")
@@ -46,26 +50,18 @@ def main():
     # Initialize accelerator
     accelerator = Accelerator(log_with="wandb")
 
-    # Try to pull a previous checkpoint + resume state from HF Hub (main process
-    # downloads to RESUME_DIR; others wait at the barrier before reading).
+    # Look for a previous checkpoint on the durable mount (CHECKPOINT_DIR).
+    # If found, resume from it; otherwise start fresh from the base model.
     resume_state = None
-    if push_to_hub and repo_id:
-        if accelerator.is_local_main_process:
-            try:
-                from huggingface_hub import snapshot_download
-                snapshot_download(
-                    repo_id=repo_id,
-                    allow_patterns=["last_checkpoint_causal/**", "resume_state.json"],
-                    local_dir=RESUME_DIR,
-                )
-                accelerator.print(f">>> Pulled resume artifacts from {repo_id}")
-            except Exception as e:
-                accelerator.print(f">>> No resumable checkpoint at {repo_id} (starting fresh): {e}")
-        accelerator.wait_for_everyone()
-        if os.path.isfile(RESUME_STATE_PATH) and os.path.isdir(RESUME_CKPT_PATH):
-            with open(RESUME_STATE_PATH) as f:
-                resume_state = json.load(f)
-            accelerator.print(f">>> Resuming from {RESUME_CKPT_PATH} | state={resume_state}")
+    if accelerator.is_local_main_process:
+        os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+    accelerator.wait_for_everyone()
+    if os.path.isfile(RESUME_STATE_PATH) and os.path.isdir(LAST_CKPT_PATH):
+        with open(RESUME_STATE_PATH) as f:
+            resume_state = json.load(f)
+        accelerator.print(f">>> Resuming from {LAST_CKPT_PATH} | state={resume_state}")
+    else:
+        accelerator.print(f">>> No resumable checkpoint at {CHECKPOINT_DIR} (starting fresh)")
 
     # Try to set the WandB run name to match the RunAI job name; resume the
     # same WandB run id if we found one in the resume state.
@@ -185,7 +181,7 @@ def main():
             })
             
     # Load model — from resume checkpoint if we have one, else the base model.
-    model_load_path = RESUME_CKPT_PATH if resume_state else model_name
+    model_load_path = LAST_CKPT_PATH if resume_state else model_name
     accelerator.print(f"Loading model weights from: {model_load_path}")
     model = AutoModelForCausalLM.from_pretrained(model_load_path, trust_remote_code=True)
     model.config.pad_token_id = tokenizer.pad_token_id
@@ -434,20 +430,21 @@ def main():
             }, step=global_step)
             
             if accelerator.is_local_main_process:
-                accelerator.print("Saving checkpoints on main process...")
+                accelerator.print(f"Saving checkpoints to {CHECKPOINT_DIR}...")
                 unwrapped_model = accelerator.unwrap_model(model)
                 if avg_eval_loss < best_eval_loss:
                     best_eval_loss = avg_eval_loss
                     accelerator.print(f"New best validation loss ({avg_eval_loss:.4f})! Saving best_checkpoint_causal...")
-                    unwrapped_model.save_pretrained("best_checkpoint_causal")
-                    tokenizer.save_pretrained("best_checkpoint_causal")
-                    
+                    unwrapped_model.save_pretrained(BEST_CKPT_PATH)
+                    tokenizer.save_pretrained(BEST_CKPT_PATH)
+
                 accelerator.print("Saving last_checkpoint_causal...")
-                unwrapped_model.save_pretrained("last_checkpoint_causal")
-                tokenizer.save_pretrained("last_checkpoint_causal")
+                unwrapped_model.save_pretrained(LAST_CKPT_PATH)
+                tokenizer.save_pretrained(LAST_CKPT_PATH)
                 accelerator.print("Checkpoints saved successfully.")
 
-                # Persist resume state locally (used by final HF push and any in-pod restart).
+                # Persist resume state on the durable mount so a restarted pod
+                # can pick up exactly here.
                 state_payload = {
                     "epoch": epoch + 1,
                     "global_step": global_step,
@@ -455,7 +452,7 @@ def main():
                     "total_tokens_seen": total_tokens_seen,
                     "wandb_run_id": wandb_run_id,
                 }
-                with open("resume_state.json", "w") as f:
+                with open(RESUME_STATE_PATH, "w") as f:
                     json.dump(state_payload, f)
 
             # CRITICAL MULTI-GPU BARRIER: Wait for main process to finish disk I/O before continuing training!
@@ -474,9 +471,9 @@ def main():
     # Final evaluation on unseen test set
     if test_dataloader:
         accelerator.print("\n=== Running Final Evaluation on the Unseen Test Set ===")
-        if os.path.exists("best_checkpoint_causal"):
-            accelerator.print("Loading best causal checkpoint for final test evaluation...")
-            model = AutoModelForCausalLM.from_pretrained("best_checkpoint_causal", trust_remote_code=True).to(accelerator.device)
+        if os.path.exists(BEST_CKPT_PATH):
+            accelerator.print(f"Loading best causal checkpoint from {BEST_CKPT_PATH} for final test evaluation...")
+            model = AutoModelForCausalLM.from_pretrained(BEST_CKPT_PATH, trust_remote_code=True).to(accelerator.device)
             
         model.eval()
         total_test_loss = 0
@@ -527,16 +524,16 @@ def main():
         accelerator.print(f"Pushing causal checkpoints to Hugging Face Hub: {repo_id}")
         api.create_repo(repo_id=repo_id, exist_ok=True)
         
-        if os.path.exists("best_checkpoint_causal"):
+        if os.path.exists(BEST_CKPT_PATH):
             api.upload_folder(
-                folder_path="best_checkpoint_causal",
+                folder_path=BEST_CKPT_PATH,
                 repo_id=repo_id,
                 path_in_repo="best_checkpoint_causal",
                 commit_message="Upload best causal checkpoint"
             )
-        if os.path.exists("last_checkpoint_causal"):
+        if os.path.exists(LAST_CKPT_PATH):
             api.upload_folder(
-                folder_path="last_checkpoint_causal",
+                folder_path=LAST_CKPT_PATH,
                 repo_id=repo_id,
                 path_in_repo="last_checkpoint_causal",
                 commit_message="Upload last causal checkpoint"
