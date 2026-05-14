@@ -170,12 +170,33 @@ def main():
     model = AutoModelForSequenceClassification.from_pretrained(
         model_name,
         config=hf_config,
-        trust_remote_code=True
+        trust_remote_code=True,
+        ignore_mismatched_sizes=True
     )
     model.config.pad_token_id = tokenizer.pad_token_id
-    accelerator.print(f"Model config num_labels: {model.config.num_labels}")
+    
+    # EMERGENCY OVERRIDE: Ensure the model head matches num_labels
+    actual_num_labels = getattr(model, 'num_labels', model.config.num_labels)
+    if actual_num_labels != num_labels:
+        accelerator.print(f"CRITICAL WARNING: Model initialized with {actual_num_labels} labels, but dataset needs {num_labels}. Re-initializing head...")
+        model.config.num_labels = num_labels
+        if hasattr(model, 'num_labels'):
+            model.num_labels = num_labels
+            
+        # Manually re-create the classification head (Qwen uses 'score')
+        for attr_name in ['score', 'classifier']:
+            if hasattr(model, attr_name):
+                old_head = getattr(model, attr_name)
+                in_features = old_head.weight.shape[1]
+                # Re-initialize a fresh linear layer with the correct output dimension
+                new_head = torch.nn.Linear(in_features, num_labels, bias=False)
+                new_head.to(model.device)
+                setattr(model, attr_name, new_head)
+                accelerator.print(f"Successfully forced {attr_name} to {num_labels} labels.")
+    
+    accelerator.print(f"Final model config num_labels: {model.config.num_labels}")
     if hasattr(model, 'num_labels'):
-        accelerator.print(f"Model num_labels: {model.num_labels}")
+        accelerator.print(f"Final model num_labels attribute: {model.num_labels}")
     
     # Optional: freeze the model backbone to train only the classification head
     freeze_backbone = model_config.get('freeze_backbone', False)
