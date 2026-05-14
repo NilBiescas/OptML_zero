@@ -34,7 +34,7 @@ runai submit \
   --environment HF_TOKEN="${HF_TOKEN:-}" \
   --environment RUN_NAME="${JOB_NAME}" \
   --environment GITHUB_TOKEN="${GITHUB_TOKEN:-}" \
-  --command -- bash -c 'git clone https://${GITHUB_TOKEN}@github.com/NilBiescas/OptML_zero.git && cd OptML_zero && bash classificationhead/run_lozo.sh'
+  --command -- bash -c 'git clone https://${GITHUB_TOKEN}@github.com/NilBiescas/OptML_zero.git && cd OptML_zero/classificationhead && bash run_lozo.sh'
 
 cat <<EOF
 

@@ -42,8 +42,8 @@ echo ">>> Installing dependencies for LOZO"
 # Ensure we have the required packages for the new training script
 pip install --upgrade transformers datasets accelerate evaluate pyyaml
 
-echo ">>> Starting LOZO training (classificationhead/config.yaml)"
+echo ">>> Starting LOZO training (config.yaml)"
 # We use accelerate to launch across the 4 GPUs
-accelerate launch --num_processes 4 classificationhead/train.py --config classificationhead/config.yaml
+accelerate launch --num_processes 4 train.py --config config.yaml
 
 echo ">>> LOZO Training complete."

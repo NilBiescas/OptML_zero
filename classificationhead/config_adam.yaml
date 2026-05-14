@@ -15,14 +15,10 @@ training:
   #max_tokens: 100 #  10000000 # Uncomment to train for a specific number of tokens instead of epochs
 
 optimizer:
-  name: "LOZO" # Can be LOZO, LOZOM, or standard optimizers like AdamW
+  name: "AdamW" # Standard AdamW optimizer
   kwargs:
     lr: 1.0e-5
-    eps: 1.0e-3
-    r: 4
-    nu: 50
-    # beta: 0.9 # Uncomment if using LOZOM
 
 hub:
   push_to_hub: true
-  repo_id: "Nbiescas/lozo-qwen-banking77_cls" # IMPORTANT: Change to your actual HF username/repo!
+  repo_id: "Nbiescas/adamw-qwen-banking77_cls" # IMPORTANT: Change to your actual HF username/repo!
