@@ -142,8 +142,9 @@ def main():
         for split in tokenized_datasets.keys():
             labels = tokenized_datasets[split]["labels"]
             if isinstance(labels, torch.Tensor):
-                labels = labels.tolist()
-            all_labels.extend(labels)
+                all_labels.extend(labels.tolist())
+            else:
+                all_labels.extend([int(x) for x in labels])
         accelerator.print(f"GLOBAL MIN LABEL: {min(all_labels)}")
         accelerator.print(f"GLOBAL MAX LABEL: {max(all_labels)}")
         accelerator.print(f"NUM UNIQUE LABELS: {len(set(all_labels))}")
@@ -176,23 +177,28 @@ def main():
     model.config.pad_token_id = tokenizer.pad_token_id
     
     # EMERGENCY OVERRIDE: Ensure the model head matches num_labels
-    actual_num_labels = getattr(model, 'num_labels', model.config.num_labels)
-    if actual_num_labels != num_labels:
-        accelerator.print(f"CRITICAL WARNING: Model initialized with {actual_num_labels} labels, but dataset needs {num_labels}. Re-initializing head...")
+    head = getattr(model, "score", getattr(model, "classifier", None))
+    if head is None or model.config.num_labels != num_labels or head.out_features != num_labels:
+        accelerator.print(f"CRITICAL WARNING: Model head mismatch detected. Re-initializing head to {num_labels} labels...")
+        in_features = head.in_features if head is not None else getattr(model.config, "hidden_size", 1024)
+        bias = head.bias is not None if head is not None else False
+        
+        new_head = torch.nn.Linear(in_features, num_labels, bias=bias)
+        
+        # CRITICAL FIX: Match the model's dtype and device to prevent mat1/mat2 dtype mismatch
+        new_head.to(device=model.device, dtype=model.dtype)
+        
+        if hasattr(model, "score"):
+            model.score = new_head
+        elif hasattr(model, "classifier"):
+            model.classifier = new_head
+            
         model.config.num_labels = num_labels
         if hasattr(model, 'num_labels'):
             model.num_labels = num_labels
-            
-        # Manually re-create the classification head (Qwen uses 'score')
-        for attr_name in ['score', 'classifier']:
-            if hasattr(model, attr_name):
-                old_head = getattr(model, attr_name)
-                in_features = old_head.weight.shape[1]
-                # Re-initialize a fresh linear layer with the correct output dimension
-                new_head = torch.nn.Linear(in_features, num_labels, bias=False)
-                new_head.to(model.device)
-                setattr(model, attr_name, new_head)
-                accelerator.print(f"Successfully forced {attr_name} to {num_labels} labels.")
+        model.config.id2label = {i: str(i) for i in range(num_labels)}
+        model.config.label2id = {str(i): i for i in range(num_labels)}
+        accelerator.print(f"Successfully forced classification head to {num_labels} labels with dtype {model.dtype}.")
     
     accelerator.print(f"Final model config num_labels: {model.config.num_labels}")
     if hasattr(model, 'num_labels'):
