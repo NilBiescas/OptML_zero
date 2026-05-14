@@ -14,7 +14,7 @@ GASPAR="pilligua"
 
 # TODO: replace with your RCP project (e.g. "cs-439-students", "vilab-<gaspar>", ...).
 # Ask your TA or check `runai list projects` on the RCP login node.
-PROJECT="cvlab-pilligua"
+PROJECT="course-cs-552-pilligua"
 
 # SSH clone URL of your fork. Pod authenticates with the deploy key stored
 # in .env as DEPLOY_KEY_B64 (the public half is configured on the repo).
@@ -43,13 +43,13 @@ runai submit \
   --gpu "${GPUS}" \
   --large-shm \
   --node-pools "${NODE}" \
-  --existing-pvc claimname=cvlab-scratch,path=/scratch \
+  --existing-pvc claimname=course-cs-552-scratch-g37,path=/scratch \
   --environment HF_HUB_ENABLE_HF_TRANSFER=1 \
   --environment WANDB_API_KEY="${WANDB_API_KEY}" \
   --environment WANDB_ENTITY="nilbiescas3" \
   --environment HF_TOKEN="${HF_TOKEN:-}" \
   --environment RUN_NAME="${JOB_NAME}" \
-  --environment CHECKPOINT_DIR="/scratch/${JOB_NAME}" \
+  --environment CHECKPOINT_DIR="/scratch/optml-zero/${JOB_NAME}" \
   --environment DEPLOY_KEY_B64="${DEPLOY_KEY_B64}" \
   --environment GIT_REPO_SSH="${GIT_REPO_SSH}" \
   --environment CONFIG_FILE="${CONFIG_FILE}" \
