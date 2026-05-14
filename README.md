@@ -120,7 +120,7 @@ runai logs -f <job-name> -p <project-name>
 ```
 
 ### 2. Live WandB Charts
-All logs are streamed in real-time to Weights & Biases (under the project `lozo-training`). You can log in to your browser dashboard to visualize:
+All logs are streamed in real-time to Weights & Biases (under the project `lozo-generative-training`). You can log in to your browser dashboard to visualize:
 - **`train_loss`**: Smoothed loss descent per step.
 - **`eval_accuracy` & `eval_loss`**: Validation metric updates evaluated per epoch.
 - **`samples_per_second` & `step_time_sec`**: Throughput and latency benchmarking metrics.

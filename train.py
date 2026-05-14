@@ -1,4 +1,5 @@
 import os
+import json
 import yaml
 import argparse
 import torch
@@ -12,6 +13,10 @@ from tqdm import tqdm
 
 from optimizers.lozo import LOZOM, LOZO
 from optimizers.sparse_mezo import SparseMeZO
+
+RESUME_DIR = "./resume_download"
+RESUME_STATE_PATH = os.path.join(RESUME_DIR, "resume_state.json")
+RESUME_CKPT_PATH = os.path.join(RESUME_DIR, "last_checkpoint_causal")
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Fine-tune generative model using config")
@@ -40,14 +45,48 @@ def main():
     
     # Initialize accelerator
     accelerator = Accelerator(log_with="wandb")
-    
-    # Try to set the WandB run name to match the RunAI job name
+
+    # Try to pull a previous checkpoint + resume state from HF Hub (main process
+    # downloads to RESUME_DIR; others wait at the barrier before reading).
+    resume_state = None
+    if push_to_hub and repo_id:
+        if accelerator.is_local_main_process:
+            try:
+                from huggingface_hub import snapshot_download
+                snapshot_download(
+                    repo_id=repo_id,
+                    allow_patterns=["last_checkpoint_causal/**", "resume_state.json"],
+                    local_dir=RESUME_DIR,
+                )
+                accelerator.print(f">>> Pulled resume artifacts from {repo_id}")
+            except Exception as e:
+                accelerator.print(f">>> No resumable checkpoint at {repo_id} (starting fresh): {e}")
+        accelerator.wait_for_everyone()
+        if os.path.isfile(RESUME_STATE_PATH) and os.path.isdir(RESUME_CKPT_PATH):
+            with open(RESUME_STATE_PATH) as f:
+                resume_state = json.load(f)
+            accelerator.print(f">>> Resuming from {RESUME_CKPT_PATH} | state={resume_state}")
+
+    # Try to set the WandB run name to match the RunAI job name; resume the
+    # same WandB run id if we found one in the resume state.
     run_name = os.environ.get("RUN_NAME", None)
-    init_kwargs = {}
+    wandb_kwargs = {}
     if run_name:
-        init_kwargs["init_kwargs"] = {"wandb": {"name": run_name}}
-        
+        wandb_kwargs["name"] = run_name
+    if resume_state and resume_state.get("wandb_run_id"):
+        wandb_kwargs["id"] = resume_state["wandb_run_id"]
+        wandb_kwargs["resume"] = "allow"
+    init_kwargs = {"init_kwargs": {"wandb": wandb_kwargs}} if wandb_kwargs else {}
+
     accelerator.init_trackers(project_name="lozo-generative-training", config=config, **init_kwargs)
+
+    # Capture the wandb run id so we can persist it for future resumes.
+    wandb_run_id = None
+    if accelerator.is_local_main_process:
+        try:
+            wandb_run_id = accelerator.get_tracker("wandb").run.id
+        except Exception:
+            pass
     
     # Crucial: set seed across all processes to ensure deterministic initializations
     set_seed(seed)
@@ -145,8 +184,10 @@ def main():
                 "test": tokenized_datasets["test"]
             })
             
-    # Load model
-    model = AutoModelForCausalLM.from_pretrained(model_name, trust_remote_code=True)
+    # Load model — from resume checkpoint if we have one, else the base model.
+    model_load_path = RESUME_CKPT_PATH if resume_state else model_name
+    accelerator.print(f"Loading model weights from: {model_load_path}")
+    model = AutoModelForCausalLM.from_pretrained(model_load_path, trust_remote_code=True)
     model.config.pad_token_id = tokenizer.pad_token_id
     
     # Use DataCollatorForSeq2Seq which handles dynamic padding of inputs and pads labels with -100
@@ -227,13 +268,19 @@ def main():
             test_dataloader = accelerator.prepare(test_dataloader)
             
     accelerator.print(f"Starting training for {epochs} epochs using {opt_name} optimizer")
-    
-    global_step = 0
+
     run_start_time = time.time()
-    best_eval_loss = float('inf')
-    total_tokens_seen = 0
-    
-    epoch = 0
+    if resume_state:
+        epoch = resume_state.get("epoch", 0)
+        global_step = resume_state.get("global_step", 0)
+        best_eval_loss = resume_state.get("best_eval_loss", float('inf'))
+        total_tokens_seen = resume_state.get("total_tokens_seen", 0)
+        accelerator.print(f">>> Resuming at epoch={epoch} step={global_step} best_eval_loss={best_eval_loss:.4f} tokens={total_tokens_seen}")
+    else:
+        epoch = 0
+        global_step = 0
+        best_eval_loss = float('inf')
+        total_tokens_seen = 0
     while True:
         if max_tokens is None and epoch >= epochs:
             break
@@ -399,7 +446,41 @@ def main():
                 unwrapped_model.save_pretrained("last_checkpoint_causal")
                 tokenizer.save_pretrained("last_checkpoint_causal")
                 accelerator.print("Checkpoints saved successfully.")
-            
+
+                # Persist resume state alongside the checkpoint.
+                state_payload = {
+                    "epoch": epoch + 1,
+                    "global_step": global_step,
+                    "best_eval_loss": best_eval_loss,
+                    "total_tokens_seen": total_tokens_seen,
+                    "wandb_run_id": wandb_run_id,
+                }
+                with open("resume_state.json", "w") as f:
+                    json.dump(state_payload, f)
+
+                # Push last_checkpoint_causal + resume_state.json to HF Hub so
+                # the next pod (after preemption) can resume from here.
+                if push_to_hub and repo_id:
+                    try:
+                        from huggingface_hub import HfApi
+                        api = HfApi()
+                        api.create_repo(repo_id=repo_id, exist_ok=True)
+                        api.upload_folder(
+                            folder_path="last_checkpoint_causal",
+                            repo_id=repo_id,
+                            path_in_repo="last_checkpoint_causal",
+                            commit_message=f"checkpoint after epoch {epoch+1}",
+                        )
+                        api.upload_file(
+                            path_or_fileobj="resume_state.json",
+                            path_in_repo="resume_state.json",
+                            repo_id=repo_id,
+                            commit_message=f"resume state epoch {epoch+1}",
+                        )
+                        accelerator.print(f">>> Uploaded resume checkpoint to {repo_id}")
+                    except Exception as e:
+                        accelerator.print(f">>> HF upload failed (will retry next epoch): {e}")
+
             # CRITICAL MULTI-GPU BARRIER: Wait for main process to finish disk I/O before continuing training!
             accelerator.wait_for_everyone()
             accelerator.print(f"--- Evaluation for Epoch {epoch+1} Complete ---\n")
