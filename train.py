@@ -285,6 +285,35 @@ def main():
         if test_dataloader:
             test_dataloader = accelerator.prepare(test_dataloader)
             
+    # Optional LR scheduler (cosine with linear warmup). Configured via YAML.
+    sched_cfg = config.get('scheduler', {}) or {}
+    scheduler = None
+    if sched_cfg.get('type') == 'cosine':
+        from torch.optim.lr_scheduler import LambdaLR
+        steps_per_epoch = len(train_dataloader)
+        warmup_steps   = int(sched_cfg.get('warmup_steps', 0))
+        t_max_epochs   = int(sched_cfg.get('t_max_epochs', epochs))
+        t_max_steps    = max(1, t_max_epochs * steps_per_epoch)
+        eta_min_ratio  = float(sched_cfg.get('eta_min_ratio', 0.0))
+
+        def lr_lambda(step):
+            if step < warmup_steps:
+                return float(step + 1) / float(max(1, warmup_steps))
+            progress = (step - warmup_steps) / float(max(1, t_max_steps - warmup_steps))
+            progress = min(1.0, progress)
+            return eta_min_ratio + (1.0 - eta_min_ratio) * 0.5 * (1.0 + math.cos(math.pi * progress))
+
+        scheduler = LambdaLR(optimizer, lr_lambda, last_epoch=-1)
+        accelerator.print(
+            f"[Scheduler] cosine | warmup={warmup_steps} | t_max_steps={t_max_steps} "
+            f"({t_max_epochs} epochs) | eta_min_ratio={eta_min_ratio}"
+        )
+
+        _sched_state_path = "last_checkpoint_causal/scheduler_state.pt"
+        if resume_state and os.path.exists(_sched_state_path):
+            accelerator.print("Loading scheduler state for resume...")
+            scheduler.load_state_dict(torch.load(_sched_state_path))
+
     accelerator.print(f"Starting training for {epochs} epochs using {opt_name} optimizer")
     
     global_step       = resume_state['global_step']       if resume_state else 0
@@ -364,15 +393,19 @@ def main():
             
             samples_per_second = (local_bsz * accelerator.num_processes) / step_time
             
+            if scheduler is not None:
+                scheduler.step()
+
             log_metrics = {
                 "train_loss": train_loss_val,
                 "step_time_sec": step_time,
                 "samples_per_second": samples_per_second,
-                "total_tokens_seen": total_tokens_seen
+                "total_tokens_seen": total_tokens_seen,
+                "lr": optimizer.param_groups[0]['lr'],
             }
             if torch.cuda.is_available():
                 log_metrics["gpu_memory_MB"] = torch.cuda.max_memory_allocated() / (1024 ** 2)
-                
+
             accelerator.log(log_metrics, step=global_step)
             global_step += 1
             
@@ -466,6 +499,8 @@ def main():
                         "total_tokens_seen": total_tokens_seen,
                     }, _sf)
                 torch.save(optimizer.state_dict(), "last_checkpoint_causal/optimizer_state.pt")
+                if scheduler is not None:
+                    torch.save(scheduler.state_dict(), "last_checkpoint_causal/scheduler_state.pt")
                 accelerator.print("Checkpoints saved successfully.")
 
                 # Push last checkpoint to HF Hub right away so a preempted pod
