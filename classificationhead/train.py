@@ -163,9 +163,13 @@ def main():
             accelerator.print(f"  Label ID: {label.item() if hasattr(label, 'item') else label}\n")
         accelerator.print("===============================\n")
     
+    from transformers import AutoConfig
+    hf_config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
+    hf_config.num_labels = num_labels
+    
     model = AutoModelForSequenceClassification.from_pretrained(
         model_name,
-        num_labels=num_labels,
+        config=hf_config,
         trust_remote_code=True
     )
     model.config.pad_token_id = tokenizer.pad_token_id
