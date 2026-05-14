@@ -16,13 +16,12 @@ training:
   #max_tokens: 100 #  10000000 # Uncomment to train for a specific number of tokens instead of epochs
 
 optimizer:
-  name: "LOZO" # Can be LOZO, LOZOM, or standard optimizers like AdamW
+  name: "LOZO" # Can be LOZO or LOZOM
   kwargs:
-    lr: 1.0e-5
+    lr: 1.0e-6
     eps: 1.0e-3
-    r: 4
-    nu: 50
-    # beta: 0.9 # Uncomment if using LOZOM
+    r: 8
+    nu: 100
 
 hub:
   push_to_hub: true
