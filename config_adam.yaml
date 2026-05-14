@@ -20,4 +20,4 @@ optimizer:
 
 hub:
   push_to_hub: true
-  repo_id: "Nbiescas/adamw-generative-qwen-banking77"
+  repo_id: "mpilligua/adamw-generative-qwen-banking77"
