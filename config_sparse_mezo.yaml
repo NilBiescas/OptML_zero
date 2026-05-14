@@ -25,4 +25,4 @@ optimizer:
 
 hub:
   push_to_hub: true
-  repo_id: "Nbiescas/sparse-mezo-qwen-banking77"
+  repo_id: "mpilligua/sparse-mezo-qwen-banking77"
