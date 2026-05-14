@@ -35,7 +35,8 @@ echo ">>> Installing dependencies"
 pip install --upgrade transformers datasets accelerate evaluate pyyaml
 
 CONFIG_FILE="${CONFIG_FILE:-config.yaml}"
-echo ">>> Starting baseline training (${CONFIG_FILE})"
-accelerate launch --num_processes 4 train.py --config "${CONFIG_FILE}"
+NPROC="${NPROC:-1}"
+echo ">>> Starting baseline training (${CONFIG_FILE}, ${NPROC} processes)"
+accelerate launch --num_processes "${NPROC}" train.py --config "${CONFIG_FILE}"
 
 echo ">>> Baseline training complete."

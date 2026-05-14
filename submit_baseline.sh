@@ -13,7 +13,7 @@ GIT_REPO_SSH="git@github.com:mpilligua/OptML_zero.git"
 GIT_REPO_DIR="OptML_zero"
 IMAGE="registry.rcp.epfl.ch/course-cs-552/base-vllm:v1"
 
-GPUS=4
+GPUS="${GPUS:-1}"
 NODE="${NODE:-a100-40g}"
 CONFIG_FILE="${CONFIG_FILE:-config_adam.yaml}"
 NAME_TAG="${NAME_TAG:-baseline}"
@@ -39,6 +39,7 @@ runai submit \
   --environment HF_TOKEN="${HF_TOKEN:-}" \
   --environment RUN_NAME="${JOB_NAME}" \
   --environment CHECKPOINT_DIR="/scratch/optml-zero/${JOB_NAME}" \
+  --environment NPROC="${GPUS}" \
   --environment DEPLOY_KEY_B64="${DEPLOY_KEY_B64}" \
   --environment GIT_REPO_SSH="${GIT_REPO_SSH}" \
   --environment CONFIG_FILE="${CONFIG_FILE}" \
