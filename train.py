@@ -1,4 +1,5 @@
 import os
+import json
 import yaml
 import argparse
 import torch
@@ -9,9 +10,30 @@ from transformers import AutoTokenizer, AutoModelForCausalLM, set_seed, DataColl
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+from huggingface_hub import HfApi
 
 from optimizers.lozo import LOZOM, LOZO
 from optimizers.sparse_mezo import SparseMeZO
+from optimizers.dizo import DiZO
+
+def _try_pull_checkpoint(repo_id: str) -> None:
+    """Download last_checkpoint_causal/ from HF Hub into the working directory.
+
+    Called at pod startup so a preempted job can resume from the last pushed
+    checkpoint rather than starting from scratch. Silently does nothing if the
+    repo or folder doesn't exist yet (first run).
+    """
+    try:
+        from huggingface_hub import snapshot_download
+        snapshot_download(
+            repo_id=repo_id,
+            local_dir=".",
+            allow_patterns=["last_checkpoint_causal/**"],
+            ignore_patterns=["*.lock"],
+        )
+    except Exception:
+        pass  # repo doesn't exist yet or network error — start fresh
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Fine-tune generative model using config")
@@ -32,12 +54,12 @@ def main():
     
     push_to_hub = hub_config.get('push_to_hub', False)
     repo_id = hub_config.get('repo_id', None)
-    
+
     seed = train_config.get('seed', 42)
     batch_size = train_config.get('batch_size', 16)
     epochs = train_config.get('epochs', 3)
     max_tokens = train_config.get('max_tokens', None)
-    
+
     # Initialize accelerator
     accelerator = Accelerator(log_with="wandb")
     
@@ -49,6 +71,22 @@ def main():
         
     accelerator.init_trackers(project_name="lozo-generative-training", config=config, **init_kwargs)
     
+    # --- Preemption resume: pull last checkpoint from HF Hub before anything else ---
+    resume_state = None
+    if push_to_hub and repo_id:
+        with accelerator.main_process_first():
+            _try_pull_checkpoint(repo_id)
+        _state_path = "last_checkpoint_causal/training_state.json"
+        if os.path.exists(_state_path):
+            with open(_state_path) as _f:
+                resume_state = json.load(_f)
+            accelerator.print(
+                f"[Resume] Found checkpoint — epoch {resume_state['epoch']}, "
+                f"step {resume_state['global_step']}. Resuming."
+            )
+        else:
+            accelerator.print("[Resume] No checkpoint on HF Hub — starting fresh.")
+
     # Crucial: set seed across all processes to ensure deterministic initializations
     set_seed(seed)
     torch.manual_seed(seed)
@@ -145,8 +183,11 @@ def main():
                 "test": tokenized_datasets["test"]
             })
             
-    # Load model
-    model = AutoModelForCausalLM.from_pretrained(model_name, trust_remote_code=True)
+    # Load model — from local checkpoint when resuming, otherwise from HF Hub
+    _ckpt_dir = "last_checkpoint_causal"
+    _model_src = _ckpt_dir if (resume_state and os.path.exists(_ckpt_dir)) else model_name
+    accelerator.print(f"Loading model from: {_model_src}")
+    model = AutoModelForCausalLM.from_pretrained(_model_src, trust_remote_code=True)
     model.config.pad_token_id = tokenizer.pad_token_id
     
     # Use DataCollatorForSeq2Seq which handles dynamic padding of inputs and pads labels with -100
@@ -174,6 +215,7 @@ def main():
     for i, (name, p) in enumerate(model.named_parameters()):
         if p.requires_grad:
             p.param_id = i
+            p.param_name = name
 
     # Print a few examples to verify formatting and masking
     if accelerator.is_local_main_process:
@@ -196,7 +238,7 @@ def main():
     opt_name = opt_config.get('name', 'LOZO')
     opt_kwargs = opt_config.get('kwargs', {})
     
-    is_zeroth_order = opt_name in ["LOZO", "LOZOM", "SparseMeZO"]
+    is_zeroth_order = opt_name in ["LOZO", "LOZOM", "SparseMeZO", "DiZO"]
 
     if is_zeroth_order:
         model.to(accelerator.device)
@@ -204,9 +246,18 @@ def main():
             optimizer = LOZOM(model.parameters(), **opt_kwargs)
         elif opt_name == "SparseMeZO":
             optimizer = SparseMeZO(model.parameters(), **opt_kwargs)
+        elif opt_name == "DiZO":
+            optimizer = DiZO(model.parameters(), **opt_kwargs)
         else:
             optimizer = LOZO(model.parameters(), **opt_kwargs)
-            
+
+        _opt_state_path = "last_checkpoint_causal/optimizer_state.pt"
+        if resume_state and os.path.exists(_opt_state_path):
+            accelerator.print("Loading ZO optimizer state for resume...")
+            optimizer.load_state_dict(
+                torch.load(_opt_state_path, map_location=accelerator.device)
+            )
+
         optimizer, train_dataloader = accelerator.prepare(optimizer, train_dataloader)
         if eval_dataloader:
             eval_dataloader = accelerator.prepare(eval_dataloader)
@@ -219,7 +270,14 @@ def main():
             optimizer = opt_class(model.parameters(), **opt_kwargs)
         else:
             raise ValueError(f"Optimizer {opt_name} not found in torch.optim or custom definitions.")
-            
+
+        _opt_state_path = "last_checkpoint_causal/optimizer_state.pt"
+        if resume_state and os.path.exists(_opt_state_path):
+            accelerator.print("Loading FO optimizer state for resume...")
+            optimizer.load_state_dict(
+                torch.load(_opt_state_path, map_location=accelerator.device)
+            )
+
         model, optimizer, train_dataloader = accelerator.prepare(model, optimizer, train_dataloader)
         if eval_dataloader:
             eval_dataloader = accelerator.prepare(eval_dataloader)
@@ -228,12 +286,11 @@ def main():
             
     accelerator.print(f"Starting training for {epochs} epochs using {opt_name} optimizer")
     
-    global_step = 0
+    global_step       = resume_state['global_step']       if resume_state else 0
+    best_eval_loss    = resume_state['best_eval_loss']    if resume_state else float('inf')
+    total_tokens_seen = resume_state['total_tokens_seen'] if resume_state else 0
+    epoch             = resume_state['epoch']             if resume_state else 0
     run_start_time = time.time()
-    best_eval_loss = float('inf')
-    total_tokens_seen = 0
-    
-    epoch = 0
     while True:
         if max_tokens is None and epoch >= epochs:
             break
@@ -398,7 +455,33 @@ def main():
                 accelerator.print("Saving last_checkpoint_causal...")
                 unwrapped_model.save_pretrained("last_checkpoint_causal")
                 tokenizer.save_pretrained("last_checkpoint_causal")
+
+                # Persist training state and optimizer state for preemption recovery
+                with open("last_checkpoint_causal/training_state.json", "w") as _sf:
+                    json.dump({
+                        "epoch":             epoch + 1,
+                        "global_step":       global_step,
+                        "best_eval_loss":    best_eval_loss,
+                        "total_tokens_seen": total_tokens_seen,
+                    }, _sf)
+                torch.save(optimizer.state_dict(), "last_checkpoint_causal/optimizer_state.pt")
                 accelerator.print("Checkpoints saved successfully.")
+
+                # Push last checkpoint to HF Hub right away so a preempted pod
+                # can resume from it on the next restart — don't wait until end.
+                if push_to_hub and repo_id:
+                    try:
+                        _api = HfApi()
+                        _api.create_repo(repo_id=repo_id, exist_ok=True)
+                        _api.upload_folder(
+                            folder_path="last_checkpoint_causal",
+                            repo_id=repo_id,
+                            path_in_repo="last_checkpoint_causal",
+                            commit_message=f"Resume checkpoint epoch {epoch+1} step {global_step}",
+                        )
+                        accelerator.print(f"Checkpoint pushed to HF Hub (epoch {epoch+1}).")
+                    except Exception as _e:
+                        accelerator.print(f"Warning: HF Hub push failed: {_e}")
             
             # CRITICAL MULTI-GPU BARRIER: Wait for main process to finish disk I/O before continuing training!
             accelerator.wait_for_everyone()
