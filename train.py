@@ -11,6 +11,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from optimizers.lozo import LOZOM, LOZO
+from optimizers.sparse_mezo import SparseMeZO
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Fine-tune generative model using config")
@@ -195,12 +196,14 @@ def main():
     opt_name = opt_config.get('name', 'LOZO')
     opt_kwargs = opt_config.get('kwargs', {})
     
-    is_zeroth_order = opt_name in ["LOZO", "LOZOM"]
-    
+    is_zeroth_order = opt_name in ["LOZO", "LOZOM", "SparseMeZO"]
+
     if is_zeroth_order:
         model.to(accelerator.device)
         if opt_name == "LOZOM":
             optimizer = LOZOM(model.parameters(), **opt_kwargs)
+        elif opt_name == "SparseMeZO":
+            optimizer = SparseMeZO(model.parameters(), **opt_kwargs)
         else:
             optimizer = LOZO(model.parameters(), **opt_kwargs)
             
