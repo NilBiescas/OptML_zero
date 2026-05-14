@@ -447,7 +447,7 @@ def main():
                 tokenizer.save_pretrained("last_checkpoint_causal")
                 accelerator.print("Checkpoints saved successfully.")
 
-                # Persist resume state alongside the checkpoint.
+                # Persist resume state locally (used by final HF push and any in-pod restart).
                 state_payload = {
                     "epoch": epoch + 1,
                     "global_step": global_step,
@@ -457,29 +457,6 @@ def main():
                 }
                 with open("resume_state.json", "w") as f:
                     json.dump(state_payload, f)
-
-                # Push last_checkpoint_causal + resume_state.json to HF Hub so
-                # the next pod (after preemption) can resume from here.
-                if push_to_hub and repo_id:
-                    try:
-                        from huggingface_hub import HfApi
-                        api = HfApi()
-                        api.create_repo(repo_id=repo_id, exist_ok=True)
-                        api.upload_folder(
-                            folder_path="last_checkpoint_causal",
-                            repo_id=repo_id,
-                            path_in_repo="last_checkpoint_causal",
-                            commit_message=f"checkpoint after epoch {epoch+1}",
-                        )
-                        api.upload_file(
-                            path_or_fileobj="resume_state.json",
-                            path_in_repo="resume_state.json",
-                            repo_id=repo_id,
-                            commit_message=f"resume state epoch {epoch+1}",
-                        )
-                        accelerator.print(f">>> Uploaded resume checkpoint to {repo_id}")
-                    except Exception as e:
-                        accelerator.print(f">>> HF upload failed (will retry next epoch): {e}")
 
             # CRITICAL MULTI-GPU BARRIER: Wait for main process to finish disk I/O before continuing training!
             accelerator.wait_for_everyone()
