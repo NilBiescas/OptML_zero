@@ -15,6 +15,8 @@ from huggingface_hub import HfApi
 from optimizers.lozo import LOZOM, LOZO
 from optimizers.sparse_mezo import SparseMeZO
 from optimizers.dizo import DiZO
+from optimizers.mezo import MeZO
+from optimizers.hizoo import HiZOO
 
 def _try_pull_checkpoint(repo_id: str) -> None:
     """Download last_checkpoint_causal/ from HF Hub into the working directory.
@@ -240,7 +242,7 @@ def main():
     opt_name = opt_config.get('name', 'LOZO')
     opt_kwargs = opt_config.get('kwargs', {})
     
-    is_zeroth_order = opt_name in ["LOZO", "LOZOM", "SparseMeZO", "DiZO"]
+    is_zeroth_order = opt_name in ["LOZO", "LOZOM", "SparseMeZO", "DiZO", "MeZO", "HiZOO"]
 
     if is_zeroth_order:
         model.to(accelerator.device)
@@ -250,6 +252,10 @@ def main():
             optimizer = SparseMeZO(model.parameters(), **opt_kwargs)
         elif opt_name == "DiZO":
             optimizer = DiZO(model.parameters(), **opt_kwargs)
+        elif opt_name == "MeZO":
+            optimizer = MeZO(model.parameters(), **opt_kwargs)
+        elif opt_name == "HiZOO":
+            optimizer = HiZOO(model.parameters(), **opt_kwargs)
         else:
             optimizer = LOZO(model.parameters(), **opt_kwargs)
 
