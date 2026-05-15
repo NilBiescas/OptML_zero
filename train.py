@@ -439,9 +439,24 @@ def main():
             unwrapped_model = accelerator.unwrap_model(model)
             if avg_eval_loss < best_eval_loss:
                 best_eval_loss = avg_eval_loss
-                accelerator.print(f"New best validation loss ({avg_eval_loss:.4f})! Saving best_checkpoint_causal...")
+                accelerator.print(f"New best validation loss ({avg_eval_loss:.4f})! Saving and pushing best_checkpoint_causal...")
                 unwrapped_model.save_pretrained("best_checkpoint_causal")
                 tokenizer.save_pretrained("best_checkpoint_causal")
+                
+                # Push BEST checkpoint to hub immediately
+                if push_to_hub and repo_id:
+                    try:
+                        _api = HfApi()
+                        _api.create_repo(repo_id=repo_id, exist_ok=True)
+                        _api.upload_folder(
+                            folder_path="best_checkpoint_causal",
+                            repo_id=repo_id,
+                            path_in_repo="best_checkpoint_causal",
+                            commit_message=f"New best model: epoch {curr_epoch+1} step {curr_global_step} loss {avg_eval_loss:.4f}",
+                        )
+                        accelerator.print("Best checkpoint pushed to HF Hub.")
+                    except Exception as _e:
+                        accelerator.print(f"Warning: Best checkpoint push failed: {_e}")
                 
             accelerator.print("Saving last_checkpoint_causal...")
             unwrapped_model.save_pretrained("last_checkpoint_causal")
