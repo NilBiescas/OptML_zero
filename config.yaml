@@ -14,19 +14,19 @@ training:
   eval_steps: null
   eval_epochs: 10
   #max_tokens: 100000 # Uncomment to train for specific token counts instead of epochs
-  lr_scheduler:
-    type: "cosine"
-    warmup_ratio: 0.05
-    start_lr: 1.0e-7
+  #lr_scheduler:
+  #  type: "cosine"
+  #  warmup_ratio: 0.05
+  #  start_lr: 1.0e-7
 
 optimizer:
   name: "LOZO" # Can be LOZO or LOZOM
   kwargs:
-    lr: 1.0e-6
+    lr: 5.0e-7
     eps: 1.0e-3
     r: 8
     nu: 100
 
 hub:
   push_to_hub: true
-  repo_id: "Nbiescas/lozo-generative-qwen-banking77_cosine_v2"
+  repo_id: "Nbiescas/lozo-generative-qwen-banking77_cosine_v2_lr"
