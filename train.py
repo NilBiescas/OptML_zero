@@ -262,9 +262,16 @@ def main():
         _opt_state_path = "last_checkpoint_causal/optimizer_state.pt"
         if resume_state and os.path.exists(_opt_state_path):
             accelerator.print("Loading ZO optimizer state for resume...")
-            optimizer.load_state_dict(
-                torch.load(_opt_state_path, map_location=accelerator.device, weights_only=False)
-            )
+            try:
+                optimizer.load_state_dict(
+                    torch.load(_opt_state_path, map_location=accelerator.device, weights_only=False)
+                )
+            except Exception as e:
+                accelerator.print(f"Warning: Could not load optimizer state ({e}).")
+                accelerator.print(f"Syncing optimizer step count from global_step ({resume_state['global_step']}) instead.")
+                for group in optimizer.param_groups:
+                    for p in group['params']:
+                        optimizer.state[p]['step'] = resume_state['global_step']
 
         optimizer, train_dataloader = accelerator.prepare(optimizer, train_dataloader)
         if eval_dataloader:
@@ -324,9 +331,12 @@ def main():
         _opt_state_path = "last_checkpoint_causal/optimizer_state.pt"
         if resume_state and os.path.exists(_opt_state_path):
             accelerator.print("Loading FO optimizer state for resume...")
-            optimizer.load_state_dict(
-                torch.load(_opt_state_path, map_location=accelerator.device, weights_only=False)
-            )
+            try:
+                optimizer.load_state_dict(
+                    torch.load(_opt_state_path, map_location=accelerator.device, weights_only=False)
+                )
+            except Exception as e:
+                accelerator.print(f"Warning: Could not load FO optimizer state ({e}).")
 
         model, optimizer, train_dataloader = accelerator.prepare(model, optimizer, train_dataloader)
         if eval_dataloader:
