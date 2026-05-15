@@ -39,7 +39,7 @@ class LOZO(Optimizer):
                     continue
                 
                 state = self.state[p]
-                if len(state) == 0:
+                if 'step' not in state:
                     state['step'] = 0
                 
                 # Retrieve the deterministic parameter ID injected by the training loop
@@ -54,7 +54,7 @@ class LOZO(Optimizer):
                 generator.manual_seed(param_seed)
                 
                 if p.dim() >= 2:
-                    if state['step'] % nu == 0:
+                    if state['step'] % nu == 0 or 'V' not in state:
                         # Resample V_l
                         V_dim = p.numel() // p.size(0)
                         state['V'] = torch.randn(V_dim, r, dtype=p.dtype, device=p.device, generator=generator)
@@ -164,12 +164,13 @@ class LOZOM(Optimizer):
                     continue
                 
                 state = self.state[p]
-                if len(state) == 0:
+                if 'step' not in state:
                     state['step'] = 0
-                    if p.dim() >= 2:
-                        state['N'] = torch.zeros(p.size(0), r, device=p.device, dtype=p.dtype)
-                    else:
-                        state['N_1d'] = torch.zeros_like(p)
+                
+                if p.dim() >= 2 and 'N' not in state:
+                    state['N'] = torch.zeros(p.size(0), r, device=p.device, dtype=p.dtype)
+                elif p.dim() < 2 and 'N_1d' not in state:
+                    state['N_1d'] = torch.zeros_like(p)
                 
                 # Retrieve the deterministic parameter ID injected by the training loop
                 param_id = getattr(p, 'param_id', 0)
@@ -183,7 +184,7 @@ class LOZOM(Optimizer):
                 generator.manual_seed(param_seed)
                 
                 if p.dim() >= 2:
-                    if state['step'] % nu == 0:
+                    if state['step'] % nu == 0 or 'V' not in state:
                         V_dim = p.numel() // p.size(0)
                         if 'V' in state:
                             V_old = state['V']
