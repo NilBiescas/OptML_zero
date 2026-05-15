@@ -62,6 +62,7 @@ def main():
     epochs = train_config.get('epochs', 3)
     max_tokens = train_config.get('max_tokens', None)
     eval_steps = train_config.get('eval_steps', None)
+    eval_epochs = train_config.get('eval_epochs', 1)
 
     # Initialize accelerator
     accelerator = Accelerator(log_with="wandb")
@@ -567,12 +568,6 @@ def main():
             accelerator.log(log_metrics, step=global_step)
             global_step += 1
             
-            if eval_steps is not None and global_step > 0 and global_step % eval_steps == 0:
-                run_evaluation(epoch, global_step)
-                if is_zeroth_order:
-                    model.eval()
-                else:
-                    model.train()
             
             if max_tokens is not None and total_tokens_seen >= max_tokens:
                 accelerator.print(f"Reached max_tokens ({max_tokens}). Stopping training loop.")
@@ -581,7 +576,8 @@ def main():
         avg_train_loss = total_loss / (len(train_dataloader) if len(train_dataloader) > 0 else 1)
         accelerator.print(f"Epoch {epoch+1} finished. Avg train loss: {avg_train_loss:.4f} | Total tokens seen: {total_tokens_seen}")
         
-        run_evaluation(epoch, global_step)
+        if (epoch + 1) % eval_epochs == 0:
+            run_evaluation(epoch, global_step)
 
         epoch += 1
         # This condition is now redundant as max_tokens logic is handled per batch step
