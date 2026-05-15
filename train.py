@@ -257,7 +257,7 @@ def main():
         if resume_state and os.path.exists(_opt_state_path):
             accelerator.print("Loading ZO optimizer state for resume...")
             optimizer.load_state_dict(
-                torch.load(_opt_state_path, map_location=accelerator.device)
+                torch.load(_opt_state_path, map_location=accelerator.device, weights_only=False)
             )
 
         optimizer, train_dataloader = accelerator.prepare(optimizer, train_dataloader)
@@ -319,7 +319,7 @@ def main():
         if resume_state and os.path.exists(_opt_state_path):
             accelerator.print("Loading FO optimizer state for resume...")
             optimizer.load_state_dict(
-                torch.load(_opt_state_path, map_location=accelerator.device)
+                torch.load(_opt_state_path, map_location=accelerator.device, weights_only=False)
             )
 
         model, optimizer, train_dataloader = accelerator.prepare(model, optimizer, train_dataloader)
@@ -355,7 +355,7 @@ def main():
         _sched_state_path = "last_checkpoint_causal/scheduler_state.pt"
         if resume_state and os.path.exists(_sched_state_path):
             accelerator.print("Loading scheduler state for resume...")
-            scheduler.load_state_dict(torch.load(_sched_state_path))
+            scheduler.load_state_dict(torch.load(_sched_state_path, weights_only=False))
 
     accelerator.print(f"Starting training for {epochs} epochs using {opt_name} optimizer")
     
