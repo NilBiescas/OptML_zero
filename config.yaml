@@ -8,9 +8,10 @@ model:
   freeze_backbone: false # Backbone must be fully trainable for true zeroth-order capability validation
 
 training:
-  epochs: 200
+  epochs: 400
   batch_size: 16 # Maximizing A100 VRAM utilization for high-throughput zeroth-order training
   seed: 42
+  eval_steps: 100
   #max_tokens: 100000 # Uncomment to train for specific token counts instead of epochs
   lr_scheduler:
     type: "cosine"
@@ -27,4 +28,4 @@ optimizer:
 
 hub:
   push_to_hub: true
-  repo_id: "Nbiescas/lozo-generative-qwen-banking77"
+  repo_id: "Nbiescas/lozo-generative-qwen-banking77_cosine"

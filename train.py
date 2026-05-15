@@ -59,6 +59,7 @@ def main():
     batch_size = train_config.get('batch_size', 16)
     epochs = train_config.get('epochs', 3)
     max_tokens = train_config.get('max_tokens', None)
+    eval_steps = train_config.get('eval_steps', None)
 
     # Initialize accelerator
     accelerator = Accelerator(log_with="wandb")
@@ -363,6 +364,102 @@ def main():
     total_tokens_seen = resume_state['total_tokens_seen'] if resume_state else 0
     epoch             = resume_state['epoch']             if resume_state else 0
     run_start_time = time.time()
+
+    def run_evaluation(curr_epoch, curr_global_step):
+        nonlocal best_eval_loss
+        if not eval_dataloader:
+            return
+        
+        accelerator.print(f"\n--- Starting Evaluation (Epoch {curr_epoch+1}, Step {curr_global_step}) ---")
+        model.eval()
+        total_eval_loss = 0
+        correct_tokens = 0
+        total_tokens = 0
+        eval_unwrapped_model = accelerator.unwrap_model(model)
+        with torch.no_grad():
+            for eval_step_idx, batch in enumerate(eval_dataloader):
+                batch = {k: v.to(accelerator.device) for k, v in batch.items()}
+                outputs = eval_unwrapped_model(
+                    input_ids=batch["input_ids"],
+                    attention_mask=batch["attention_mask"],
+                    labels=batch["labels"]
+                )
+                eval_loss = outputs.loss
+                avg_loss = accelerator.reduce(eval_loss.detach(), reduction="mean")
+                total_eval_loss += avg_loss.item()
+                
+                # Compute token-level accuracy
+                shift_logits = outputs.logits[..., :-1, :].contiguous()
+                shift_labels = batch["labels"][..., 1:].contiguous()
+                predictions = shift_logits.argmax(dim=-1)
+                
+                local_mask = (shift_labels != -100)
+                local_correct = (predictions[local_mask] == shift_labels[local_mask]).sum().to(accelerator.device)
+                local_total = local_mask.sum().to(accelerator.device)
+                
+                batch_correct = accelerator.reduce(local_correct, reduction="sum")
+                batch_total = accelerator.reduce(local_total, reduction="sum")
+                
+                correct_tokens += batch_correct.item()
+                total_tokens += batch_total.item()
+                    
+        avg_eval_loss = total_eval_loss / len(eval_dataloader)
+        perplexity = math.exp(avg_eval_loss) if avg_eval_loss < 20 else float('inf')
+        token_acc = correct_tokens / total_tokens if total_tokens > 0 else 0.0
+        elapsed_since_start = time.time() - run_start_time
+        
+        accelerator.print(f"Eval: Epoch {curr_epoch+1} | Step {curr_global_step} | Loss: {avg_eval_loss:.4f} | Perplexity: {perplexity:.2f} | Token Accuracy: {token_acc:.4f}")
+        accelerator.log({
+            "eval_loss": avg_eval_loss,
+            "perplexity": perplexity,
+            "eval_token_accuracy": token_acc,
+            "total_elapsed_time_sec": elapsed_since_start,
+            "epoch": curr_epoch+1
+        }, step=curr_global_step)
+        
+        if accelerator.is_local_main_process:
+            accelerator.print("Saving checkpoints on main process...")
+            unwrapped_model = accelerator.unwrap_model(model)
+            if avg_eval_loss < best_eval_loss:
+                best_eval_loss = avg_eval_loss
+                accelerator.print(f"New best validation loss ({avg_eval_loss:.4f})! Saving best_checkpoint_causal...")
+                unwrapped_model.save_pretrained("best_checkpoint_causal")
+                tokenizer.save_pretrained("best_checkpoint_causal")
+                
+            accelerator.print("Saving last_checkpoint_causal...")
+            unwrapped_model.save_pretrained("last_checkpoint_causal")
+            tokenizer.save_pretrained("last_checkpoint_causal")
+
+            # Persist training state and optimizer state for preemption recovery
+            with open("last_checkpoint_causal/training_state.json", "w") as _sf:
+                json.dump({
+                    "epoch":             curr_epoch + 1,
+                    "global_step":       curr_global_step,
+                    "best_eval_loss":    best_eval_loss,
+                    "total_tokens_seen": total_tokens_seen,
+                }, _sf)
+            torch.save(optimizer.state_dict(), "last_checkpoint_causal/optimizer_state.pt")
+            if scheduler is not None:
+                torch.save(scheduler.state_dict(), "last_checkpoint_causal/scheduler_state.pt")
+            accelerator.print("Checkpoints saved successfully.")
+
+            if push_to_hub and repo_id:
+                try:
+                    _api = HfApi()
+                    _api.create_repo(repo_id=repo_id, exist_ok=True)
+                    _api.upload_folder(
+                        folder_path="last_checkpoint_causal",
+                        repo_id=repo_id,
+                        path_in_repo="last_checkpoint_causal",
+                        commit_message=f"Resume checkpoint epoch {curr_epoch+1} step {curr_global_step}",
+                    )
+                    accelerator.print(f"Checkpoint pushed to HF Hub.")
+                except Exception as _e:
+                    accelerator.print(f"Warning: HF Hub push failed: {_e}")
+        
+        accelerator.wait_for_everyone()
+        accelerator.print(f"--- Evaluation Complete ---\n")
+
     while True:
         if max_tokens is None and epoch >= epochs:
             break
@@ -454,6 +551,13 @@ def main():
             accelerator.log(log_metrics, step=global_step)
             global_step += 1
             
+            if eval_steps is not None and global_step > 0 and global_step % eval_steps == 0:
+                run_evaluation(epoch, global_step)
+                if is_zeroth_order:
+                    model.eval()
+                else:
+                    model.train()
+            
             if max_tokens is not None and total_tokens_seen >= max_tokens:
                 accelerator.print(f"Reached max_tokens ({max_tokens}). Stopping training loop.")
                 break
@@ -461,113 +565,8 @@ def main():
         avg_train_loss = total_loss / (len(train_dataloader) if len(train_dataloader) > 0 else 1)
         accelerator.print(f"Epoch {epoch+1} finished. Avg train loss: {avg_train_loss:.4f} | Total tokens seen: {total_tokens_seen}")
         
-        # Evaluation
-        if eval_dataloader:
-            accelerator.print(f"\n--- Starting Evaluation for Epoch {epoch+1} ---")
-            model.eval()
-            total_eval_loss = 0
-            correct_tokens = 0
-            total_tokens = 0
-            eval_unwrapped_model = accelerator.unwrap_model(model)
-            with torch.no_grad():
-                for eval_step_idx, batch in enumerate(eval_dataloader):
-                    # if eval_step_idx % 10 == 0 and accelerator.is_local_main_process:
-                    #     accelerator.print(f"[Eval Epoch {epoch+1}] Processing batch {eval_step_idx}/{len(eval_dataloader)}")
-                    batch = {k: v.to(accelerator.device) for k, v in batch.items()}
-                    outputs = eval_unwrapped_model(
-                        input_ids=batch["input_ids"],
-                        attention_mask=batch["attention_mask"],
-                        labels=batch["labels"]
-                    )
-                    eval_loss = outputs.loss
-                    avg_loss = accelerator.reduce(eval_loss.detach(), reduction="mean")
-                    total_eval_loss += avg_loss.item()
-                    
-                    # Compute token-level accuracy over prediction targets
-                    # Shift logits and labels so that prediction L_i aligns with target y_{i+1}
-                    shift_logits = outputs.logits[..., :-1, :].contiguous()
-                    shift_labels = batch["labels"][..., 1:].contiguous()
-                    predictions = shift_logits.argmax(dim=-1)
-                    
-                    local_mask = (shift_labels != -100)
-                    local_correct = (predictions[local_mask] == shift_labels[local_mask]).sum().to(accelerator.device)
-                    local_total = local_mask.sum().to(accelerator.device)
-                    
-                    # Reduce scalars across all GPUs (100% robust against differing dynamic padding seq_len across GPUs)
-                    batch_correct = accelerator.reduce(local_correct, reduction="sum")
-                    batch_total = accelerator.reduce(local_total, reduction="sum")
-                    
-                    correct_tokens += batch_correct.item()
-                    total_tokens += batch_total.item()
-                    
-                    # if eval_step_idx == 0 and accelerator.is_local_main_process and local_mask.sum() > 0:
-                    #     sample_preds = predictions[local_mask][:20]
-                    #     sample_targets = shift_labels[local_mask][:20]
-                    #     pred_str = tokenizer.decode(sample_preds)
-                    #     target_str = tokenizer.decode(sample_targets)
-                    #     accelerator.print(f"\n[EVAL SANITY CHECK] Sample predictions decoded: {repr(pred_str)}")
-                    #     accelerator.print(f"[EVAL SANITY CHECK] Sample targets decoded:     {repr(target_str)}\n")
-                        
-            avg_eval_loss = total_eval_loss / len(eval_dataloader)
-            perplexity = math.exp(avg_eval_loss) if avg_eval_loss < 20 else float('inf')
-            token_acc = correct_tokens / total_tokens if total_tokens > 0 else 0.0
-            elapsed_since_start = time.time() - run_start_time
-            
-            accelerator.print(f"Epoch {epoch+1} Eval Loss: {avg_eval_loss:.4f} | Perplexity: {perplexity:.2f} | Token Accuracy: {token_acc:.4f} | Elapsed Time: {elapsed_since_start:.2f}s")
-            accelerator.log({
-                "eval_loss": avg_eval_loss,
-                "perplexity": perplexity,
-                "eval_token_accuracy": token_acc,
-                "total_elapsed_time_sec": elapsed_since_start,
-                "epoch": epoch+1
-            }, step=global_step)
-            
-            if accelerator.is_local_main_process:
-                accelerator.print("Saving checkpoints on main process...")
-                unwrapped_model = accelerator.unwrap_model(model)
-                if avg_eval_loss < best_eval_loss:
-                    best_eval_loss = avg_eval_loss
-                    accelerator.print(f"New best validation loss ({avg_eval_loss:.4f})! Saving best_checkpoint_causal...")
-                    unwrapped_model.save_pretrained("best_checkpoint_causal")
-                    tokenizer.save_pretrained("best_checkpoint_causal")
-                    
-                accelerator.print("Saving last_checkpoint_causal...")
-                unwrapped_model.save_pretrained("last_checkpoint_causal")
-                tokenizer.save_pretrained("last_checkpoint_causal")
+        run_evaluation(epoch, global_step)
 
-                # Persist training state and optimizer state for preemption recovery
-                with open("last_checkpoint_causal/training_state.json", "w") as _sf:
-                    json.dump({
-                        "epoch":             epoch + 1,
-                        "global_step":       global_step,
-                        "best_eval_loss":    best_eval_loss,
-                        "total_tokens_seen": total_tokens_seen,
-                    }, _sf)
-                torch.save(optimizer.state_dict(), "last_checkpoint_causal/optimizer_state.pt")
-                if scheduler is not None:
-                    torch.save(scheduler.state_dict(), "last_checkpoint_causal/scheduler_state.pt")
-                accelerator.print("Checkpoints saved successfully.")
-
-                # Push last checkpoint to HF Hub right away so a preempted pod
-                # can resume from it on the next restart — don't wait until end.
-                if push_to_hub and repo_id:
-                    try:
-                        _api = HfApi()
-                        _api.create_repo(repo_id=repo_id, exist_ok=True)
-                        _api.upload_folder(
-                            folder_path="last_checkpoint_causal",
-                            repo_id=repo_id,
-                            path_in_repo="last_checkpoint_causal",
-                            commit_message=f"Resume checkpoint epoch {epoch+1} step {global_step}",
-                        )
-                        accelerator.print(f"Checkpoint pushed to HF Hub (epoch {epoch+1}).")
-                    except Exception as _e:
-                        accelerator.print(f"Warning: HF Hub push failed: {_e}")
-            
-            # CRITICAL MULTI-GPU BARRIER: Wait for main process to finish disk I/O before continuing training!
-            accelerator.wait_for_everyone()
-            accelerator.print(f"--- Evaluation for Epoch {epoch+1} Complete ---\n")
-                
         epoch += 1
         # This condition is now redundant as max_tokens logic is handled per batch step
         # if max_tokens is not None and total_tokens_seen >= max_tokens:
