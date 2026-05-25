@@ -115,6 +115,14 @@ def main():
     
     accelerator.print(f"Dataset columns: {dataset['train'].column_names}")
     
+    label_col = dataset_config.get("label_column", "label")
+    if label_col not in dataset["train"].column_names:
+        for p in ["label", "gold_label", "label1"]:
+            if p in dataset["train"].column_names:
+                accelerator.print(f"Warning: configured label column '{dataset_config.get('label_column', 'label')}' not found. Auto-detected '{p}'.")
+                label_col = p
+                break
+
     # Robustly map labels from the dataset to ensure they are [0, num_labels-1]
     if label_col in dataset["train"].column_names:
         raw_labels = dataset["train"][label_col]
