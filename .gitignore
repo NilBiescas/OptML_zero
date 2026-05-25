@@ -15,6 +15,10 @@ hf_cache/
 best_checkpoint/
 last_checkpoint/
 
-# Output runs
+#Output runs
 runs/
 #LOZO/
+
+# Ignore heavy dataset files
+LOZO/data/datasets.tar
+LOZO/data/original/
