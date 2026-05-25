@@ -1,6 +1,10 @@
 dataset:
-  name: "glue"
-  subset: "rte"
+  name: "csv"
+  delimiter: "\t"
+  data_files:
+    train: "../LOZO/data/k-shot-1k-test/RTE/16-42/train.tsv"
+    validation: "../LOZO/data/k-shot-1k-test/RTE/16-42/dev.tsv"
+    test: "../LOZO/data/k-shot-1k-test/RTE/16-42/test.tsv"
   text_column: "sentence1"
   text_column2: "sentence2"
   label_column: "label"
@@ -10,7 +14,6 @@ model:
   freeze_backbone: false
 
 training:
-  few_shot_k: 16
   epochs: 10000
   batch_size: 64
   seed: 42
@@ -19,7 +22,7 @@ training:
 optimizer:
   name: "LOZO"
   kwargs:
-    lr: 1.0e-7
+    lr: 1.0e-6
     eps: 1.0e-3
     r: 4
     nu: 100

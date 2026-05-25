@@ -58,15 +58,23 @@ def main():
     
     dataset_name = dataset_config.get('name', 'PolyAI/banking77')
     dataset_subset = dataset_config.get('subset', None)
+    data_files = dataset_config.get('data_files', None)
+    delimiter = dataset_config.get('delimiter', None)
     text_col = dataset_config.get('text_column', 'text')
     text_col2 = dataset_config.get('text_column2', None)
     label_col = dataset_config.get('label_column', 'label')
     
-    accelerator.print(f"Loading dataset {dataset_name} (subset: {dataset_subset})...")
+    load_kwargs = {}
+    if data_files:
+        load_kwargs['data_files'] = data_files
+    if delimiter:
+        load_kwargs['delimiter'] = delimiter
+
+    accelerator.print(f"Loading dataset {dataset_name} (subset: {dataset_subset}) with kwargs {load_kwargs}...")
     if dataset_subset:
-        dataset = load_dataset(dataset_name, dataset_subset)
+        dataset = load_dataset(dataset_name, dataset_subset, **load_kwargs)
     else:
-        dataset = load_dataset(dataset_name)
+        dataset = load_dataset(dataset_name, **load_kwargs)
     
     few_shot_k = train_config.get('few_shot_k', None)
     if few_shot_k is not None:

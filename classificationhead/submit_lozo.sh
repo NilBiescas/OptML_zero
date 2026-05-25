@@ -8,7 +8,7 @@ set -euo pipefail
 
 GASPAR="nil"
 
-GPUS=4
+GPUS=1
 NODE="${NODE:-a100-40g}"
 JOB_NAME="${GASPAR}-lozo-$(date +%H%M%S)"
 PROJECT="vilab-${GASPAR}"
@@ -37,7 +37,7 @@ for DATASET in snli mnli rte; do
     --environment HF_TOKEN="${HF_TOKEN:-}" \
     --environment RUN_NAME="${JOB_NAME}" \
     --environment GITHUB_TOKEN="${GITHUB_TOKEN:-}" \
-    --command -- bash -c "git clone https://\${GITHUB_TOKEN}@github.com/NilBiescas/OptML_zero.git && cd OptML_zero/classificationhead && accelerate launch --num_processes 4 train.py --config config_${DATASET}.yaml"
+    --command -- bash -c "git clone https://\${GITHUB_TOKEN}@github.com/NilBiescas/OptML_zero.git && cd OptML_zero/LOZO/data && bash download_dataset.sh && cd ../medium_models && pip install --upgrade transformers datasets evaluate pandas scipy scikit-learn && python tools/generate_k_shot_data.py --mode k-shot-1k-test --k 16 && cd ../../classificationhead && accelerate launch --num_processes 4 train.py --config config_${DATASET}.yaml"
 
   echo ">>> Job submitted: ${JOB_NAME}"
 done
