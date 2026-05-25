@@ -69,6 +69,9 @@ def main():
         load_kwargs['data_files'] = data_files
     if delimiter:
         load_kwargs['delimiter'] = delimiter
+        if delimiter == '\t':
+            import csv
+            load_kwargs['quoting'] = csv.QUOTE_NONE
 
     accelerator.print(f"Loading dataset {dataset_name} (subset: {dataset_subset}) with kwargs {load_kwargs}...")
     if dataset_subset:
@@ -95,8 +98,8 @@ def main():
     # Robustly map labels from the dataset to ensure they are [0, num_labels-1]
     if label_col in dataset["train"].column_names:
         raw_labels = dataset["train"][label_col]
-        # Ensure labels are treated as integers for correct sorting and mapping, ignoring -1
-        unique_labels = sorted(set(int(x) for x in raw_labels if int(x) != -1))
+        # Filter out '-1' regardless of if it's a string or int
+        unique_labels = sorted(set(x for x in raw_labels if str(x) != "-1"))
         label2id = {label: idx for idx, label in enumerate(unique_labels)}
         id2label = {idx: str(label) for label, idx in label2id.items()}
         num_labels = len(unique_labels)
@@ -120,8 +123,8 @@ def main():
             tokenized = tokenizer(examples[text_col], truncation=True, max_length=128)
         
         if label2id is not None:
-            # Ensure label is converted to int before mapping lookup, ignore -1
-            tokenized["labels"] = [label2id[int(label)] if int(label) != -1 else -1 for label in examples[label_col]]
+            # Look up label in mapping, ignore -1
+            tokenized["labels"] = [label2id[label] if str(label) != "-1" else -1 for label in examples[label_col]]
         else:
             # Fallback if no mapping exists
             tokenized["labels"] = [int(label) for label in examples[label_col]]
