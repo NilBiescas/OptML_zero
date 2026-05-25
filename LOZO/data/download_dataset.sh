@@ -4,5 +4,5 @@ HF_USER=$(python3 -c "from huggingface_hub import HfApi; import os; print(HfApi(
 
 echo "Downloading dataset from: ${HF_USER}/LM-BFF-datasets"
 
-# Download the 'original' folder from the HF dataset directly into the pod's data/original directory
-huggingface-cli download --repo-type dataset "${HF_USER}/LM-BFF-datasets" original --local-dir original --token "${HF_TOKEN:-}"
+# Download the dataset (which contains the 'original' folder) into the current directory
+huggingface-cli download --repo-type dataset "${HF_USER}/LM-BFF-datasets" --local-dir . --token "${HF_TOKEN:-}"
