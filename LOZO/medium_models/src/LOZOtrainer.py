@@ -53,7 +53,11 @@ from transformers.integrations import (
     is_tensorboard_available,
     is_wandb_available,
 )
-from transformers.optimization import AdamW, get_linear_schedule_with_warmup, get_scheduler
+from transformers.optimization import get_linear_schedule_with_warmup, get_scheduler
+try:
+    from transformers.optimization import AdamW
+except ImportError:
+    from torch.optim import AdamW
 
 from transformers.trainer_callback import (
     DefaultFlowCallback,

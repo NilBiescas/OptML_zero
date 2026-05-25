@@ -249,12 +249,17 @@ def main():
     
     # EMERGENCY OVERRIDE: Ensure the model head matches num_labels
     head = getattr(model, "score", getattr(model, "classifier", None))
-    if head is None or model.config.num_labels != num_labels or head.out_features != num_labels:
+    
+    # Safely get out_features and in_features depending on head type
+    head_out = getattr(head, "out_features", getattr(getattr(head, "out_proj", None), "out_features", None))
+    head_in = getattr(head, "in_features", getattr(getattr(head, "dense", None), "in_features", None))
+    
+    if head is None or model.config.num_labels != num_labels or (head_out is not None and head_out != num_labels):
         accelerator.print(f"CRITICAL WARNING: Model head mismatch detected. Re-initializing head to {num_labels} labels...")
-        in_features = head.in_features if head is not None else getattr(model.config, "hidden_size", 1024)
-        bias = head.bias is not None if head is not None else False
+        in_features = head_in if head_in is not None else getattr(model.config, "hidden_size", 1024)
         
-        new_head = torch.nn.Linear(in_features, num_labels, bias=bias)
+        # If it's a RoBERTa model, we should ideally recreate the RobertaClassificationHead, but a Linear layer is a functional fallback
+        new_head = torch.nn.Linear(in_features, num_labels)
         
         # CRITICAL FIX: Match the model's dtype and device to prevent mat1/mat2 dtype mismatch
         new_head.to(device=model.device, dtype=model.dtype)
