@@ -485,12 +485,16 @@ class LowRankTrainer(LinearHeadTrainer):
 
         # Distributed training (should be after apex fp16 initialization)
         if self.args.local_rank != -1:
-            model = torch.nn.parallel.DistributedDataParallel(
-                model,
-                device_ids=[self.args.local_rank],
-                output_device=self.args.local_rank,
-                find_unused_parameters=True,
-            )
+            import torch.distributed as dist
+            if dist.is_available() and dist.is_initialized():
+                model = torch.nn.parallel.DistributedDataParallel(
+                    model,
+                    device_ids=[self.args.local_rank],
+                    output_device=self.args.local_rank,
+                    find_unused_parameters=True,
+                )
+            else:
+                logger.warning("local_rank != -1 but torch.distributed is not initialized. Skipping DistributedDataParallel.")
 
         # Train
         if transformers.is_torch_tpu_available():
