@@ -1,9 +1,6 @@
 #!/bin/bash
-# Fast download from Hugging Face instead of Princeton
-pip install -U huggingface_hub
-
 # Get the username dynamically based on the HF_TOKEN
-HF_USER=$(python -c "from huggingface_hub import HfApi; import os; print(HfApi(token=os.environ.get('HF_TOKEN')).whoami()['name'])")
+HF_USER=$(python3 -c "from huggingface_hub import HfApi; import os; print(HfApi(token=os.environ.get('HF_TOKEN')).whoami()['name'])")
 
 echo "Downloading dataset from: ${HF_USER}/LM-BFF-datasets"
 
