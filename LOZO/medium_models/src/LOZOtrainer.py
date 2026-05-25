@@ -435,6 +435,10 @@ class LowRankTrainer(LinearHeadTrainer):
         The training logic is directly borrowed from transformers.Trainer (version 3.0.2).
         Add early stopping.
         """
+        import torch.distributed as dist
+        if self.args.local_rank != -1 and not (dist.is_available() and dist.is_initialized()):
+            logger.warning("local_rank != -1 but torch.distributed is not initialized. Forcing local_rank = -1 to treat as single-GPU.")
+            self.args.local_rank = -1
         if self.args.from_linearhead and model_path is None:
             super().train(model_path, dev_objective) # Train output layer using LinearHeadTrainer
 
