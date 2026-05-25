@@ -74,10 +74,30 @@ def main():
             load_kwargs['quoting'] = csv.QUOTE_NONE
 
     accelerator.print(f"Loading dataset {dataset_name} (subset: {dataset_subset}) with kwargs {load_kwargs}...")
-    if dataset_subset:
-        dataset = load_dataset(dataset_name, dataset_subset, **load_kwargs)
-    else:
-        dataset = load_dataset(dataset_name, **load_kwargs)
+    try:
+        if dataset_subset:
+            dataset = load_dataset(dataset_name, dataset_subset, **load_kwargs)
+        else:
+            dataset = load_dataset(dataset_name, **load_kwargs)
+    except Exception as e:
+        accelerator.print(f"Failed to load dataset with HuggingFace datasets ({e}). Falling back to robust manual TSV loading...")
+        import pandas as pd
+        from datasets import Dataset, DatasetDict
+        splits = {}
+        for split, path in data_files.items():
+            with open(path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+            header = lines[0].strip('\n').split('\t')
+            records = []
+            for line in lines[1:]:
+                parts = line.strip('\n').split('\t')
+                if len(parts) > len(header):
+                    parts = parts[:len(header)]
+                elif len(parts) < len(header):
+                    parts = parts + [""] * (len(header) - len(parts))
+                records.append({h: p for h, p in zip(header, parts)})
+            splits[split] = Dataset.from_pandas(pd.DataFrame(records))
+        dataset = DatasetDict(splits)
     
     few_shot_k = train_config.get('few_shot_k', None)
     if few_shot_k is not None:

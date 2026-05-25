@@ -30,7 +30,7 @@ for TASK in SNLI MNLI RTE; do
   # 2. Downloads the datasets into LOZO/data
   # 3. Generates the 16-shot splits
   # 4. Runs the original lozo.sh training script for the specific task
-  COMMAND_STR="ln -sf /usr/bin/python3 /usr/bin/python && git clone https://\${GITHUB_TOKEN}@github.com/NilBiescas/OptML_zero.git && cd OptML_zero/LOZO/data && bash download_dataset.sh && cd ../medium_models && ln -sf ../data data && apt-get update && apt-get install -y jq && pip install transformers==4.28.1 && python tools/generate_k_shot_data.py --mode k-shot-1k-test --k 16 && TASK=${TASK} K=16 SEED=42 BS=64 LR=1e-6 EPS=1e-3 MODEL=roberta-large RANK=4 STEP_INTERVAL=100 bash lozo.sh"
+  COMMAND_STR="ln -sf /usr/bin/python3 /usr/bin/python && git clone https://\${GITHUB_TOKEN}@github.com/NilBiescas/OptML_zero.git && cd OptML_zero/LOZO/data && bash download_dataset.sh && cd ../medium_models && ln -sf ../data data && apt-get update && apt-get install -y jq && python tools/generate_k_shot_data.py --mode k-shot-1k-test --k 16 && TASK=${TASK} K=16 SEED=42 BS=64 LR=1e-6 EPS=1e-3 MODEL=roberta-large RANK=4 STEP_INTERVAL=100 bash lozo.sh"
 
   runai submit \
     --name "${JOB_NAME}" \
