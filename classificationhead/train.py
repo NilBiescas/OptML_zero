@@ -126,8 +126,8 @@ def main():
     # Robustly map labels from the dataset to ensure they are [0, num_labels-1]
     if label_col in dataset["train"].column_names:
         raw_labels = dataset["train"][label_col]
-        # Filter out '-1' regardless of if it's a string or int
-        unique_labels = sorted(set(x for x in raw_labels if str(x) != "-1"))
+        # Filter out '-1', '-', and '' regardless of if it's a string or int
+        unique_labels = sorted(set(x for x in raw_labels if str(x).strip() not in ["-1", "-", ""]))
         label2id = {label: idx for idx, label in enumerate(unique_labels)}
         id2label = {idx: str(label) for label, idx in label2id.items()}
         num_labels = len(unique_labels)
@@ -151,8 +151,8 @@ def main():
             tokenized = tokenizer(examples[text_col], truncation=True, max_length=128)
         
         if label2id is not None:
-            # Look up label in mapping, ignore -1
-            tokenized["labels"] = [label2id[label] if str(label) != "-1" else -1 for label in examples[label_col]]
+            # Look up label in mapping, ignore -1, -, and empty string
+            tokenized["labels"] = [label2id[label] if str(label).strip() not in ["-1", "-", ""] else -1 for label in examples[label_col]]
         else:
             # Fallback if no mapping exists
             tokenized["labels"] = [int(label) for label in examples[label_col]]

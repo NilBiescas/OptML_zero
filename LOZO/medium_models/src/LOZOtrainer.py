@@ -41,7 +41,11 @@ import math
 import time
 
 import transformers
-from transformers.file_utils import is_datasets_available, is_in_notebook, is_torch_tpu_available
+try:
+    from transformers.file_utils import is_datasets_available, is_in_notebook, is_torch_tpu_available
+except ImportError:
+    from transformers.utils import is_datasets_available, is_in_notebook
+    is_torch_tpu_available = lambda: False
 from transformers.integrations import (
     is_comet_available,
     is_optuna_available,
