@@ -1,0 +1,28 @@
+dataset:
+  name: "glue"
+  subset: "rte"
+  text_column: "sentence1"
+  text_column2: "sentence2"
+  label_column: "label"
+
+model:
+  name: "roberta-large"
+  freeze_backbone: false
+
+training:
+  few_shot_k: 16
+  epochs: 10000
+  batch_size: 64
+  seed: 42
+  eval_epochs: 1000
+
+optimizer:
+  name: "LOZO"
+  kwargs:
+    lr: 1.0e-7
+    eps: 1.0e-3
+    r: 4
+    nu: 100
+
+hub:
+  push_to_hub: false

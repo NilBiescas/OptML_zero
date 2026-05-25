@@ -20,29 +20,33 @@ elif [ -f ../.env ]; then
     export $(grep -v '^#' ../.env | xargs)
 fi
 
-echo ">>> Submitting ${JOB_NAME} (${GPUS} GPUs, preemptible training job)"
+echo ">>> Submitting 3 preemptible training jobs for SNLI, MNLI, and RTE (${GPUS} GPUs each)"
 
-runai submit \
-  --name "${JOB_NAME}" \
-  -p "${PROJECT}" \
-  --image "${IMAGE}" \
-  --gpu "${GPUS}" \
-  --large-shm \
-  --node-pools "${NODE}" \
-  --environment HF_HUB_ENABLE_HF_TRANSFER=1 \
-  --environment WANDB_API_KEY="${WANDB_API_KEY}" \
-  --environment HF_TOKEN="${HF_TOKEN:-}" \
-  --environment RUN_NAME="${JOB_NAME}" \
-  --environment GITHUB_TOKEN="${GITHUB_TOKEN:-}" \
-  --command -- bash -c 'git clone https://${GITHUB_TOKEN}@github.com/NilBiescas/OptML_zero.git && cd OptML_zero/classificationhead && bash run_lozo.sh'
+for DATASET in snli mnli rte; do
+  JOB_NAME="${GASPAR}-lozo-${DATASET}-$(date +%H%M%S)"
+
+  runai submit \
+    --name "${JOB_NAME}" \
+    -p "${PROJECT}" \
+    --image "${IMAGE}" \
+    --gpu "${GPUS}" \
+    --large-shm \
+    --node-pools "${NODE}" \
+    --environment HF_HUB_ENABLE_HF_TRANSFER=1 \
+    --environment WANDB_API_KEY="${WANDB_API_KEY}" \
+    --environment HF_TOKEN="${HF_TOKEN:-}" \
+    --environment RUN_NAME="${JOB_NAME}" \
+    --environment GITHUB_TOKEN="${GITHUB_TOKEN:-}" \
+    --command -- bash -c "git clone https://\${GITHUB_TOKEN}@github.com/NilBiescas/OptML_zero.git && cd OptML_zero/classificationhead && accelerate launch --num_processes 4 train.py --config config_${DATASET}.yaml"
+
+  echo ">>> Job submitted: ${JOB_NAME}"
+done
 
 cat <<EOF
 
->>> Job submitted: ${JOB_NAME}
+>>> All 3 jobs submitted successfully!
 
-Stream logs:    runai logs -f ${JOB_NAME} -p ${PROJECT}
-Status:         runai describe job ${JOB_NAME} -p ${PROJECT}
+To monitor your jobs, you can use:
 List jobs:      runai list jobs
-Stop the job:   runai delete job ${JOB_NAME} -p ${PROJECT}
-
+Stream logs:    runai logs -f <job-name> -p ${PROJECT}
 EOF

@@ -57,11 +57,28 @@ def main():
     torch.backends.cudnn.benchmark = False
     
     dataset_name = dataset_config.get('name', 'PolyAI/banking77')
+    dataset_subset = dataset_config.get('subset', None)
     text_col = dataset_config.get('text_column', 'text')
+    text_col2 = dataset_config.get('text_column2', None)
     label_col = dataset_config.get('label_column', 'label')
     
-    accelerator.print(f"Loading dataset {dataset_name}...")
-    dataset = load_dataset(dataset_name)
+    accelerator.print(f"Loading dataset {dataset_name} (subset: {dataset_subset})...")
+    if dataset_subset:
+        dataset = load_dataset(dataset_name, dataset_subset)
+    else:
+        dataset = load_dataset(dataset_name)
+    
+    few_shot_k = train_config.get('few_shot_k', None)
+    if few_shot_k is not None:
+        accelerator.print(f"Subsampling train set to {few_shot_k} shots per class (k={few_shot_k})...")
+        df = dataset["train"].to_pandas()
+        # Ensure we drop any '-1' labels from train set if they exist
+        if label_col in df.columns:
+            df = df[df[label_col] != -1]
+            df = df.groupby(label_col, group_keys=False).apply(lambda x: x.sample(n=min(len(x), few_shot_k), random_state=seed)).reset_index(drop=True)
+        from datasets import Dataset
+        dataset["train"] = Dataset.from_pandas(df)
+
     
     model_name = model_config.get('name', 'Qwen/Qwen3.5-0.8B')
     
@@ -70,8 +87,8 @@ def main():
     # Robustly map labels from the dataset to ensure they are [0, num_labels-1]
     if label_col in dataset["train"].column_names:
         raw_labels = dataset["train"][label_col]
-        # Ensure labels are treated as integers for correct sorting and mapping
-        unique_labels = sorted(set(int(x) for x in raw_labels))
+        # Ensure labels are treated as integers for correct sorting and mapping, ignoring -1
+        unique_labels = sorted(set(int(x) for x in raw_labels if int(x) != -1))
         label2id = {label: idx for idx, label in enumerate(unique_labels)}
         id2label = {idx: str(label) for label, idx in label2id.items()}
         num_labels = len(unique_labels)
@@ -89,10 +106,14 @@ def main():
     
     # We do not pad to max_length here. We truncate to 128 and use dynamic padding.
     def tokenize_function(examples):
-        tokenized = tokenizer(examples[text_col], truncation=True, max_length=128)
+        if text_col2:
+            tokenized = tokenizer(examples[text_col], examples[text_col2], truncation=True, max_length=128)
+        else:
+            tokenized = tokenizer(examples[text_col], truncation=True, max_length=128)
+        
         if label2id is not None:
-            # Ensure label is converted to int before mapping lookup
-            tokenized["labels"] = [label2id[int(label)] for label in examples[label_col]]
+            # Ensure label is converted to int before mapping lookup, ignore -1
+            tokenized["labels"] = [label2id[int(label)] if int(label) != -1 else -1 for label in examples[label_col]]
         else:
             # Fallback if no mapping exists
             tokenized["labels"] = [int(label) for label in examples[label_col]]
@@ -114,15 +135,25 @@ def main():
 
         tokenized_datasets.set_format("torch")
             
+        # Handle MNLI splits explicitly
+        if "validation" not in tokenized_datasets and "validation_matched" in tokenized_datasets:
+            accelerator.print("Using 'validation_matched' as validation split.")
+            tokenized_datasets["validation"] = tokenized_datasets["validation_matched"]
+        if "test" not in tokenized_datasets and "validation_mismatched" in tokenized_datasets:
+            accelerator.print("Using 'validation_mismatched' as test split.")
+            tokenized_datasets["test"] = tokenized_datasets["validation_mismatched"]
+
         # Dynamically split 'train' to create a validation split if not present
-        if "test" in tokenized_datasets and "validation" not in tokenized_datasets:
+        if "validation" not in tokenized_datasets:
             accelerator.print("Splitting training set to create a dynamic 'validation' split (10%)...")
             split_dataset = tokenized_datasets["train"].train_test_split(test_size=0.1, seed=seed)
-            tokenized_datasets = DatasetDict({
+            new_splits = {
                 "train": split_dataset["train"],
-                "validation": split_dataset["test"],
-                "test": tokenized_datasets["test"]
-            })
+                "validation": split_dataset["test"]
+            }
+            if "test" in tokenized_datasets:
+                new_splits["test"] = tokenized_datasets["test"]
+            tokenized_datasets = DatasetDict(new_splits)
             
     # Use DataCollatorWithPadding for dynamic padding (makes training up to 4x faster!)
     data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
@@ -456,8 +487,13 @@ def main():
                     
                     predictions = outputs.logits.argmax(dim=-1)
                     
-                    local_correct = (predictions == batch["labels"]).sum().to(accelerator.device)
-                    local_total = torch.tensor(batch["labels"].size(0)).to(accelerator.device)
+                    # Ignore -1 labels for evaluation
+                    valid_mask = batch["labels"] != -1
+                    if valid_mask.sum() == 0:
+                        continue
+                    
+                    local_correct = (predictions[valid_mask] == batch["labels"][valid_mask]).sum().to(accelerator.device)
+                    local_total = valid_mask.sum().to(accelerator.device)
                     
                     batch_correct = accelerator.reduce(local_correct, reduction="sum")
                     batch_total = accelerator.reduce(local_total, reduction="sum")
@@ -526,8 +562,12 @@ def main():
                 
                 predictions = outputs.logits.argmax(dim=-1)
                 
-                local_correct = (predictions == batch["labels"]).sum().to(accelerator.device)
-                local_total = torch.tensor(batch["labels"].size(0)).to(accelerator.device)
+                valid_mask = batch["labels"] != -1
+                if valid_mask.sum() == 0:
+                    continue
+                
+                local_correct = (predictions[valid_mask] == batch["labels"][valid_mask]).sum().to(accelerator.device)
+                local_total = valid_mask.sum().to(accelerator.device)
                 
                 batch_correct = accelerator.reduce(local_correct, reduction="sum")
                 batch_total = accelerator.reduce(local_total, reduction="sum")
