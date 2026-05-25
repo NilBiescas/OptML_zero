@@ -497,7 +497,7 @@ class LowRankTrainer(LinearHeadTrainer):
                 logger.warning("local_rank != -1 but torch.distributed is not initialized. Skipping DistributedDataParallel.")
 
         # Train
-        if transformers.is_torch_tpu_available():
+        if is_torch_tpu_available():
             total_train_batch_size = self.args.train_batch_size * xm.xrt_world_size()
         else:
             total_train_batch_size = (
