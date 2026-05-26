@@ -140,17 +140,18 @@ from transformers.utils import (
     WEIGHTS_NAME,
     find_labels,
     get_full_repo_name,
-    is_apex_available,
     is_datasets_available,
     is_in_notebook,
     is_ipex_available,
     is_sagemaker_dp_enabled,
     is_sagemaker_mp_enabled,
     is_torch_tensorrt_fx_available,
-    is_torch_tpu_available,
     is_torchdynamo_available,
     logging,
 )
+is_apex_available = lambda: False
+def is_torch_tpu_available(check_device=False):
+    return False
 from transformers.utils.generic import ContextManagers
 
 

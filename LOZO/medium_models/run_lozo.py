@@ -14,7 +14,18 @@ import numpy as np
 from transformers import AutoConfig, AutoModelForSequenceClassification, AutoTokenizer, EvalPrediction, PreTrainedTokenizerBase
 from src.modeling_roberta import RobertaConfig
 from src.modeling_opt import OPTConfig
-from transformers import GlueDataTrainingArguments as DataTrainingArguments
+try:
+    from transformers import GlueDataTrainingArguments as DataTrainingArguments
+except ImportError:
+    from dataclasses import dataclass, field as dc_field
+    from typing import Optional as Opt
+    @dataclass
+    class DataTrainingArguments:
+        """Arguments pertaining to what data we are going to input our model for training and eval."""
+        task_name: str = dc_field(metadata={"help": "The name of the task to train on."})
+        data_dir: str = dc_field(metadata={"help": "The input data dir."})
+        max_seq_length: int = dc_field(default=128, metadata={"help": "The maximum total input sequence length."})
+        overwrite_cache: bool = dc_field(default=False, metadata={"help": "Overwrite the cached training and evaluation sets."})
 from transformers import HfArgumentParser, TrainingArguments, set_seed
 
 from src.linearhead_trainer import LinearHeadTrainer

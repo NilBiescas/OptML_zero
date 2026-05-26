@@ -160,13 +160,15 @@ def main():
     
     accelerator.print("Tokenizing dataset...")
     with accelerator.main_process_first():
-        remove_cols = dataset["train"].column_names
-        tokenized_datasets = dataset.map(
-            tokenize_function, 
-            batched=True, 
-            remove_columns=remove_cols,
-            load_from_cache_file=False # Force re-mapping for debugging
-        )
+        tokenized_datasets = DatasetDict({
+            split: dataset[split].map(
+                tokenize_function, 
+                batched=True, 
+                remove_columns=dataset[split].column_names,
+                load_from_cache_file=False
+            )
+            for split in dataset.keys()
+        })
         
         # Verify labels are 0-indexed for the first few samples
         for i in range(min(5, len(tokenized_datasets['train']))):

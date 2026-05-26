@@ -136,7 +136,7 @@ class LinearHeadTrainer(transformers.Trainer):
         features = torch.cat(features, dim=0)
         targets = torch.cat(targets, dim=0)
 
-        if self.args.local_rank != -1:
+        if self.args.local_rank != -1 and torch.distributed.is_initialized():
             logger.info("Starting to gather features across workers")
             features = varsize_tensor_all_gather(features, torch.distributed.get_world_size())
             targets = varsize_tensor_all_gather(targets, torch.distributed.get_world_size())
@@ -225,8 +225,7 @@ class LinearHeadTrainer(transformers.Trainer):
 
         self.log(output.metrics)
 
-        if self.args.tpu_metrics_debug or self.args.debug:
-            # tpu-comment: Logging debug metrics for PyTorch/XLA (compile, execute times, ops, etc.)
-            xm.master_print(met.metrics_report())
+        if getattr(self.args, 'tpu_metrics_debug', False) or getattr(self.args, 'debug', ''):
+            pass  # TPU metrics debug not supported in this environment
 
         return output

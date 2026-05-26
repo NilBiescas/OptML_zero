@@ -22,7 +22,7 @@ fi
 
 echo ">>> Submitting 3 preemptible training jobs for SNLI, MNLI, and RTE (${GPUS} GPUs each)"
 
-for DATASET in snli mnli rte; do
+for DATASET in snli mnli; do
   JOB_NAME="${GASPAR}-lozo-${DATASET}-$(date +%H%M%S)"
 
   runai submit \

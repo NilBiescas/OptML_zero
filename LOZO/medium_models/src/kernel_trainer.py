@@ -32,11 +32,14 @@ from functorch import vmap, jvp, jacrev, make_functional_with_buffers
 
 import transformers
 from transformers.data.data_collator import DataCollator
-from transformers.file_utils import is_torch_tpu_available
+is_torch_tpu_available = lambda: False
 
 from transformers.modeling_utils import PreTrainedModel
 from transformers.training_args import TrainingArguments
-from transformers.trainer import SequentialDistributedSampler
+try:
+    from transformers.trainer import SequentialDistributedSampler
+except ImportError:
+    from torch.utils.data.distributed import DistributedSampler as SequentialDistributedSampler
 from transformers.trainer_utils import PredictionOutput, EvalPrediction
 from transformers.utils import logging
 if is_torch_tpu_available():
@@ -287,7 +290,7 @@ class KernelTrainerFunc(LinearHeadTrainer):
         with torch.no_grad():
             kernel, inner_targets = self.compute_kernel_outer(dataset_outer, dataset_inner)
 
-        if self.args.local_rank != -1:
+        if self.args.local_rank != -1 and torch.distributed.is_initialized():
             logger.info("Starting to gather kernel across GPUs")
             kernel = varsize_tensor_all_gather(kernel.to(self.args.device), torch.distributed.get_world_size())
             logger.info("Finished gathering kernel across GPUs")

@@ -1,10 +1,80 @@
 """Dataset utils for different data settings for GLUE."""
 
 import os
+import csv
 import logging
-from transformers import DataProcessor, InputExample
-from transformers.data.processors.glue import *
-from transformers.data.metrics import glue_compute_metrics
+
+# DataProcessor and InputExample were removed from transformers >= 4.x
+try:
+    from transformers import DataProcessor, InputExample
+except ImportError:
+    class InputExample:
+        """A single training/test example for simple sequence classification."""
+        def __init__(self, guid, text_a, text_b=None, label=None, **kwargs):
+            self.guid = guid
+            self.text_a = text_a
+            self.text_b = text_b
+            self.label = label
+
+    class DataProcessor:
+        """Base class for data converters for sequence classification data sets."""
+        @classmethod
+        def _read_tsv(cls, input_file, quotechar=None):
+            with open(input_file, "r", encoding="utf-8-sig") as f:
+                return list(csv.reader(f, delimiter="\t", quotechar=quotechar))
+
+# glue processors wildcard import - no longer available, ignore silently
+try:
+    from transformers.data.processors.glue import *
+except (ImportError, ModuleNotFoundError):
+    pass
+
+# glue_compute_metrics was removed from transformers
+try:
+    from transformers.data.metrics import glue_compute_metrics
+except (ImportError, ModuleNotFoundError):
+    from sklearn.metrics import matthews_corrcoef, f1_score
+    import numpy as np
+
+    def simple_accuracy(preds, labels):
+        return (preds == labels).mean()
+
+    def acc_and_f1(preds, labels):
+        acc = simple_accuracy(preds, labels)
+        f1 = f1_score(y_true=labels, y_pred=preds)
+        return {"acc": acc, "f1": f1, "acc_and_f1": (acc + f1) / 2}
+
+    def pearson_and_spearman(preds, labels):
+        from scipy.stats import pearsonr, spearmanr
+        pearson_corr = pearsonr(preds, labels)[0]
+        spearman_corr = spearmanr(preds, labels)[0]
+        return {"pearson": pearson_corr, "spearmanr": spearman_corr, "corr": (pearson_corr + spearman_corr) / 2}
+
+    def glue_compute_metrics(task_name, preds, labels):
+        assert len(preds) == len(labels)
+        if task_name == "cola":
+            return {"mcc": matthews_corrcoef(labels, preds)}
+        elif task_name == "sst-2":
+            return {"acc": simple_accuracy(preds, labels)}
+        elif task_name == "mrpc":
+            return acc_and_f1(preds, labels)
+        elif task_name == "sts-b":
+            return pearson_and_spearman(preds, labels)
+        elif task_name == "qqp":
+            return acc_and_f1(preds, labels)
+        elif task_name in ("mnli", "mnli-mm"):
+            return {"acc": simple_accuracy(preds, labels)}
+        elif task_name == "qnli":
+            return {"acc": simple_accuracy(preds, labels)}
+        elif task_name == "rte":
+            return {"acc": simple_accuracy(preds, labels)}
+        elif task_name == "wnli":
+            return {"acc": simple_accuracy(preds, labels)}
+        elif task_name == "snli":
+            return {"acc": simple_accuracy(preds, labels)}
+        else:
+            raise KeyError(task_name)
+
 import pandas as pd
 import logging
 

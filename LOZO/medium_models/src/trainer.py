@@ -41,7 +41,11 @@ import math
 import time
 
 import transformers
-from transformers.file_utils import is_datasets_available, is_in_notebook, is_torch_tpu_available
+try:
+    from transformers.utils import is_datasets_available, is_in_notebook
+except ImportError:
+    from transformers.file_utils import is_datasets_available, is_in_notebook
+is_torch_tpu_available = lambda: False
 from transformers.integrations import (
     is_comet_available,
     is_optuna_available,
@@ -49,7 +53,11 @@ from transformers.integrations import (
     is_tensorboard_available,
     is_wandb_available,
 )
-from transformers.optimization import AdamW, get_linear_schedule_with_warmup, get_scheduler
+try:
+    from transformers.optimization import AdamW, get_linear_schedule_with_warmup, get_scheduler
+except ImportError:
+    from torch.optim import AdamW
+    from transformers.optimization import get_linear_schedule_with_warmup, get_scheduler
 
 from transformers.trainer_callback import (
     DefaultFlowCallback,
@@ -84,11 +92,11 @@ if is_in_notebook():
 
 # Check if Pytorch version >= 1.6 to switch between Native AMP and Apex
 if version.parse(torch.__version__) < version.parse("1.6"):
-    from transformers.file_utils import is_apex_available
-
-    if is_apex_available():
+    try:
         from apex import amp
-    _use_apex = True
+        _use_apex = True
+    except ImportError:
+        pass
 else:
     _use_native_amp = True
     from torch.cuda.amp import autocast
@@ -444,9 +452,11 @@ class Trainer(LinearHeadTrainer):
         model = self.model
 
         if self.args.fp16 and _use_apex:
-            if not transformers.is_apex_available():
+            try:
+                from apex import amp
+                model, optimizer = amp.initialize(model, optimizer, opt_level=self.args.fp16_opt_level)
+            except ImportError:
                 raise ImportError("Please install apex from https://www.github.com/nvidia/apex to use fp16 training.")
-            model, optimizer = amp.initialize(model, optimizer, opt_level=self.args.fp16_opt_level)
 
         # Multi-gpu training (should be after apex fp16 initialization)
         if self.args.n_gpu > 1:
@@ -462,13 +472,13 @@ class Trainer(LinearHeadTrainer):
             )
 
         # Train
-        if transformers.is_torch_tpu_available():
-            total_train_batch_size = self.args.train_batch_size * xm.xrt_world_size()
+        if False:  # TPU not supported in this environment
+            total_train_batch_size = self.args.train_batch_size  # * xm.xrt_world_size()
         else:
             total_train_batch_size = (
                 self.args.train_batch_size
                 * self.args.gradient_accumulation_steps
-                * (torch.distributed.get_world_size() if self.args.local_rank != -1 else 1)
+                * (torch.distributed.get_world_size() if (self.args.local_rank != -1 and torch.distributed.is_initialized()) else 1)
             )
         logger.info("***** Running training *****")
         logger.info("  Num examples = %d", self.num_examples(train_dataloader))
@@ -515,13 +525,7 @@ class Trainer(LinearHeadTrainer):
             if isinstance(train_dataloader, DataLoader) and isinstance(train_dataloader.sampler, DistributedSampler):
                 train_dataloader.sampler.set_epoch(epoch)
 
-            if transformers.is_torch_tpu_available():
-                parallel_loader = pl.ParallelLoader(train_dataloader, [self.args.device]).per_device_loader(
-                    self.args.device
-                )
-                epoch_iterator = tqdm(parallel_loader, desc="Iteration", disable=not self.is_local_process_zero())
-            else:
-                epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=True)
+            epoch_iterator = tqdm(train_dataloader, desc="Iteration", disable=True)
 
             # Reset the past mems state at the beginning of each epoch if necessary.
             if self.args.past_index >= 0:
@@ -767,9 +771,7 @@ class Trainer(LinearHeadTrainer):
                                 if p.grad is not None:
                                     p.grad = torch.sign(p.grad)
 
-                        if transformers.is_torch_tpu_available():
-                            xm.optimizer_step(optimizer)
-                        elif self.args.fp16 and _use_native_amp:
+                        if self.args.fp16 and _use_native_amp:
                             self.scaler.step(optimizer)
                             self.scaler.update()
                         else:
@@ -817,9 +819,8 @@ class Trainer(LinearHeadTrainer):
             if self.args.max_steps > 0 and self.state.global_step > self.args.max_steps or (self.args.max_zo_forward_steps > 0 and self.state.zo_forward_step > self.args.max_zo_forward_steps):
                 # train_iterator.close()
                 break
-            if self.args.tpu_metrics_debug or self.args.debug:
-                # tpu-comment: Logging debug metrics for PyTorch/XLA (compile, execute times, ops, etc.)
-                xm.master_print(met.metrics_report())
+            if getattr(self.args, 'tpu_metrics_debug', False) or getattr(self.args, 'debug', ''):
+                pass  # TPU metrics debug not supported in this environment
 
         if self.args.past_index and hasattr(self, "_past"):
             # Clean the state at the end of training
@@ -860,8 +861,7 @@ class Trainer(LinearHeadTrainer):
         self.log(output.metrics)
         logger.info(output.metrics)
 
-        if self.args.tpu_metrics_debug or self.args.debug:
-            # tpu-comment: Logging debug metrics for PyTorch/XLA (compile, execute times, ops, etc.)
-            xm.master_print(met.metrics_report())
+        if getattr(self.args, 'tpu_metrics_debug', False) or getattr(self.args, 'debug', ''):
+            pass  # TPU metrics debug not supported in this environment
 
         return output
