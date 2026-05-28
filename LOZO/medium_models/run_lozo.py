@@ -1146,6 +1146,28 @@ def main():
 
             test_results.update(test_result)
 
+    # Upload best model to Hugging Face Hub
+    if trainer.is_world_process_zero():
+        hf_token = os.environ.get("HF_TOKEN")
+        if hf_token:
+            try:
+                from huggingface_hub import HfApi
+                api = HfApi(token=hf_token)
+                
+                # Get the HF username or organization to create the repo
+                user_info = api.whoami()
+                username = user_info['name']
+                repo_name = f"{username}/lozo-best-{data_args.task_name}-{model_args.model_name_or_path.split('/')[-1]}"
+                
+                logger.info(f"Creating and pushing best model (eval/test) to Hugging Face Hub: {repo_name}")
+                api.create_repo(repo_id=repo_name, exist_ok=True, private=True)
+                
+                # Push the model and tokenizer (trainer.model contains the best validation checkpoint at this point)
+                trainer.model.push_to_hub(repo_name, token=hf_token)
+                tokenizer.push_to_hub(repo_name, token=hf_token)
+                logger.info("Successfully pushed model to Hugging Face Hub!")
+            except Exception as e:
+                logger.error(f"Failed to push model to Hugging Face Hub: {e}")
 
     if trainer.is_world_process_zero():
         with FileLock('log.lock'):

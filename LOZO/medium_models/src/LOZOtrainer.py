@@ -667,6 +667,30 @@ class LowRankTrainer(LinearHeadTrainer):
                         # Now we save this to (CPU) memory instead of disk <-- much faster
                         self.best_model_ckpt = {k: v.detach().cpu() for k, v in model.state_dict().items()}
 
+                        # Upload best model to Hugging Face Hub in case of crash
+                        if self.is_world_process_zero():
+                            hf_token = os.environ.get("HF_TOKEN")
+                            if hf_token:
+                                try:
+                                    from huggingface_hub import HfApi
+                                    api = HfApi(token=hf_token)
+                                    user_info = api.whoami()
+                                    username = user_info['name']
+                                    task_name = os.environ.get("TASK", "unknown")
+                                    
+                                    model_to_push = unwrap_model(self.model)
+                                    model_name = getattr(model_to_push.config, "_name_or_path", "model").split('/')[-1]
+                                    repo_name = f"{username}/lozo-best-{task_name}-{model_name}"
+                                    
+                                    logger.info(f"Pushing intermediate best model to Hugging Face Hub: {repo_name} (in case of crash)")
+                                    api.create_repo(repo_id=repo_name, exist_ok=True, private=True)
+                                    
+                                    model_to_push.push_to_hub(repo_name, token=hf_token)
+                                    if hasattr(self, 'tokenizer') and self.tokenizer is not None:
+                                        self.tokenizer.push_to_hub(repo_name, token=hf_token)
+                                except Exception as e:
+                                    logger.error(f"Failed to push intermediate best model to Hugging Face Hub: {e}")
+
             if self.args.max_steps > 0 and self.state.global_step > self.args.max_steps or (self.args.max_zo_forward_steps > 0 and self.state.zo_forward_step > self.args.max_zo_forward_steps):
                 # train_iterator.close()
                 break
