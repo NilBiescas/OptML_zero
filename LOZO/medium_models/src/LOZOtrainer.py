@@ -660,8 +660,9 @@ class LowRankTrainer(LinearHeadTrainer):
                     metrics = output.metrics
                     objective = self.dev_objective(metrics)
                     if objective > self.objective:
-                        logger.info("Best dev result: {}".format(objective))
+                        logger.info("Best dev result: {} at step {}".format(objective, self.state.global_step))
                         self.objective = objective
+                        self.best_step = self.state.global_step
                         # self.save_model(self.args.output_dir)
 
                         # Now we save this to (CPU) memory instead of disk <-- much faster
