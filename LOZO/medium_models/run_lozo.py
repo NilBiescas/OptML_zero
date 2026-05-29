@@ -1163,7 +1163,7 @@ def main():
                 api.create_repo(repo_id=repo_name, exist_ok=True, private=True)
                 
                 # Push the model and tokenizer (trainer.model contains the best validation checkpoint at this point)
-                trainer.model.push_to_hub(repo_name, token=hf_token)
+                trainer.model.push_to_hub(repo_name, token=hf_token, safe_serialization=False)
                 tokenizer.push_to_hub(repo_name, token=hf_token)
                 logger.info("Successfully pushed model to Hugging Face Hub!")
             except Exception as e:
