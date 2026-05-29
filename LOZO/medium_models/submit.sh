@@ -20,20 +20,22 @@ elif [ -f ../../.env ]; then
     export $(grep -v '^#' ../../.env | xargs)
 fi
 
-echo ">>> Submitting 3 preemptible training jobs using the authors' original code for SNLI, MNLI, and RTE"
+echo ">>> Submitting 5 preemptible training jobs using the authors' original code for SNLI across 5 seeds"
+
+# Configuration to run across all 5 seeds (standard LOZO defaults)
+RANK=4
+STEP_INTERVAL=100
 
 for TASK in SNLI; do
-  for CONFIG in "8 100" "8 50" "4 100"; do
-    RANK=$(echo $CONFIG | cut -d' ' -f1)
-    STEP_INTERVAL=$(echo $CONFIG | cut -d' ' -f2)
-    JOB_NAME="${GASPAR}-orig-lozo-$(echo $TASK | tr '[:upper:]' '[:lower:]')-r${RANK}-i${STEP_INTERVAL}-$(date +%H%M%S)"
+  for SEED in 13 21 42 87 100; do
+    JOB_NAME="${GASPAR}-orig-lozo-$(echo $TASK | tr '[:upper:]' '[:lower:]')-r${RANK}-i${STEP_INTERVAL}-s${SEED}-$(date +%H%M%S)"
 
     # The command does the following:
     # 1. Clones the repository
     # 2. Downloads the datasets into LOZO/data
     # 3. Generates the 16-shot splits
     # 4. Runs the original lozo.sh training script for the specific task
-    COMMAND_STR="ln -sf /usr/bin/python3 /usr/bin/python && git clone -b nil_branch https://\${GITHUB_TOKEN}@github.com/NilBiescas/OptML_zero.git && cd OptML_zero/LOZO/data && bash download_dataset.sh && cd ../medium_models && ln -sf ../data data && apt-get update && apt-get install -y jq && pip install loralib loguru scipy scikit-learn && python tools/generate_k_shot_data.py --mode k-shot-1k-test --k 16 && TASK=${TASK} K=16 SEED=42 BS=64 LR=1e-6 EPS=1e-3 MODEL=roberta-large RANK=${RANK} STEP_INTERVAL=${STEP_INTERVAL} bash lozo.sh"
+    COMMAND_STR="ln -sf /usr/bin/python3 /usr/bin/python && git clone -b nil_branch https://\${GITHUB_TOKEN}@github.com/NilBiescas/OptML_zero.git && cd OptML_zero/LOZO/data && bash download_dataset.sh && cd ../medium_models && ln -sf ../data data && apt-get update && apt-get install -y jq && pip install loralib loguru scipy scikit-learn && python tools/generate_k_shot_data.py --mode k-shot-1k-test --k 16 && TASK=${TASK} K=16 SEED=${SEED} BS=64 LR=1e-6 EPS=1e-3 MODEL=roberta-large RANK=${RANK} STEP_INTERVAL=${STEP_INTERVAL} bash lozo.sh"
 
     runai submit \
       --name "${JOB_NAME}" \
@@ -56,7 +58,7 @@ done
 
 cat <<EOF
 
->>> All 3 jobs submitted successfully!
+>>> All 5 jobs submitted successfully!
 
 To monitor your jobs, you can use:
 List jobs:      runai list jobs
