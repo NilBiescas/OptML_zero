@@ -1080,7 +1080,10 @@ def main():
                 # model = model.to(training_args.device)
                 
                 # Now we just reload this from memory instead of disk <-- much faster
-                trainer.model.load_state_dict(trainer.best_model_ckpt)
+                if hasattr(trainer, 'best_model_ckpt'):
+                    trainer.model.load_state_dict(trainer.best_model_ckpt)
+                else:
+                    logger.warning("No best_model_ckpt found. Did evaluation run during training?")
 
     # Evaluation
     final_result = {
