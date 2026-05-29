@@ -23,7 +23,7 @@ fi
 echo ">>> Submitting 3 preemptible training jobs using the authors' original code for SNLI, MNLI, and RTE"
 
 for TASK in SNLI; do
-  for CONFIG in "8 100" "8 50"; do
+  for CONFIG in "8 100" "8 50" "4 100"; do
     RANK=$(echo $CONFIG | cut -d' ' -f1)
     STEP_INTERVAL=$(echo $CONFIG | cut -d' ' -f2)
     JOB_NAME="${GASPAR}-orig-lozo-$(echo $TASK | tr '[:upper:]' '[:lower:]')-r${RANK}-i${STEP_INTERVAL}-$(date +%H%M%S)"
