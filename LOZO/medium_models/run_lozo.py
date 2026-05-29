@@ -1160,7 +1160,7 @@ def main():
                 # Get the HF username or organization to create the repo
                 user_info = api.whoami()
                 username = user_info['name']
-                repo_name = f"{username}/lozo-best-{data_args.task_name}-{model_args.model_name_or_path.split('/')[-1]}"
+                repo_name = f"{username}/lozo-best-{data_args.task_name}-{model_args.model_name_or_path.split('/')[-1]}-r{training_args.rank}-i{training_args.step_interval}"
                 
                 logger.info(f"Creating and pushing best model (eval/test) to Hugging Face Hub: {repo_name}")
                 api.create_repo(repo_id=repo_name, exist_ok=True, private=True)
