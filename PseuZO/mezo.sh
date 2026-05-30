@@ -70,7 +70,7 @@ echo "Extra args: $EXTRA_ARGS $TASK_ARGS"
 python run.py \
     --model_name $MODEL \
     --task_name $TASK \
-    --output_dir /data1/xlyang/$TRAINER/result/$TASK-${MODEL_NAME}-$TAG --tag $TAG --train_set_seed $SEED --num_train $TRAIN --num_dev $DEV --num_eval $EVAL --logging_steps 10 \
+    --output_dir result/$TASK-${MODEL_NAME}-$TAG --tag $TAG --train_set_seed $SEED --num_train $TRAIN --num_dev $DEV --num_eval $EVAL --logging_steps 10 \
     --max_steps $STEPS \
     --trainer $TRAINER \
     --hessian_smooth $HESSIAN_SMOOTH \

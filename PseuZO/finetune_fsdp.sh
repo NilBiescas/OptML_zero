@@ -51,7 +51,7 @@ echo "Extra args: $EXTRA_ARGS $TASK_ARGS"
 OMP_NUM_THREADS=10 torchrun --nproc_per_node=$NUM_GPU --master_port=$(( RANDOM + 1000 )) run.py \
     --model_name $MODEL \
     --task_name $TASK \
-    --output_dir /data1/xlyang/MeZO/result/$TASK-${MODEL_NAME}-$TAG --tag $TAG --train_set_seed $SEED --num_train $TRAIN --num_dev $DEV --num_eval $EVAL --logging_steps 10 \
+    --output_dir result/$TASK-${MODEL_NAME}-$TAG --tag $TAG --train_set_seed $SEED --num_train $TRAIN --num_dev $DEV --num_eval $EVAL --logging_steps 10 \
     --trainer regular --load_float16 --fp16 --no_auto_device \
     --learning_rate $LR --num_train_epochs $EPOCH --per_device_train_batch_size 1 --gradient_accumulation_steps $BS \
     --load_best_model_at_end --evaluation_strategy epoch --save_strategy epoch --save_total_limit 1 \

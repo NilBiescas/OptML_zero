@@ -666,7 +666,7 @@ def main():
                     except Exception as e:
                         logger.warning(f"Could not log final metrics to WandB: {e}")
                 if args.local_rank <= 0:
-                    write_metrics_to_file(metrics, "/data1/xlyang/MeZO/result/" +  result_file_tag(args) + f"-trainset{train_set_id}.json" if args.result_file is None else args.result_file)
+                    write_metrics_to_file(metrics, "result/" +  result_file_tag(args) + f"-trainset{train_set_id}.json" if args.result_file is None else args.result_file)
 
     else:
         # For each eval sample, there is a training set. no training is allowed
@@ -680,7 +680,7 @@ def main():
         metrics = framework.evaluate(train_sets, eval_samples, one_train_set_per_eval_sample=True)
         logger.info(metrics)
         if args.local_rank <= 0:
-            write_metrics_to_file(metrics, "/data1/xlyang/MeZO/result/" + result_file_tag(args) + "-onetrainpereval.json" if args.result_file is None else args.result_file)
+            write_metrics_to_file(metrics, "result/" + result_file_tag(args) + "-onetrainpereval.json" if args.result_file is None else args.result_file)
 
 if __name__ == "__main__": 
     main()
