@@ -705,6 +705,9 @@ class PZOTrainer(Trainer):
             # We don't use .loss here since the model may return tuples instead of ModelOutput.
             loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
 
+        if return_outputs and isinstance(loss, tuple):
+            loss = loss[0]
+
         return (loss, outputs) if return_outputs else loss
 
     def zo_perturb_parameters(self, random_seed=None, scaling_factor=1):
@@ -1060,3 +1063,19 @@ class PZOTrainer(Trainer):
         # Push to the Hub when `save_model` is called by the user.
         if self.args.push_to_hub and not _internal_call:
             self.push_to_hub(commit_message="Model save")
+
+    def _save_checkpoint(self, model, trial, metrics=None):
+        if not hasattr(self.state, "stateful_callbacks"):
+            self.state.stateful_callbacks = {}
+        for cb in self.callback_handler.callbacks + [self.control]:
+            if hasattr(cb, "state") and getattr(cb, "__class__", None) is not None:
+                cb_name = cb.__class__.__name__
+                if cb_name not in self.state.stateful_callbacks:
+                    self.state.stateful_callbacks[cb_name] = cb.state()
+        
+        import inspect
+        sig = inspect.signature(super()._save_checkpoint)
+        if "metrics" in sig.parameters:
+            super()._save_checkpoint(model, trial, metrics=metrics)
+        else:
+            super()._save_checkpoint(model, trial)
