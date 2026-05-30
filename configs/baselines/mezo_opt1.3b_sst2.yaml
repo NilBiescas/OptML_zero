@@ -13,7 +13,9 @@ dataset:
 model:
   name: "facebook/opt-1.3b"
   freeze_backbone: false
-  dtype: "float16"
+  # fp32: lr=1e-7 ZO updates are below fp16 epsilon at typical weight
+  # magnitudes and round to zero; vast.ai run that hit 90.80% used fp32.
+  dtype: "float32"
 
 training:
   epochs: 1

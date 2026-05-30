@@ -36,7 +36,11 @@ optimizer:
     lr: 1.0e-5
     eps: 1.0e-3
     Nq: 8
-    sigma_floor: 1.0e-6
+    # sigma_floor=1e-6 lets lr_eff explode to lr/1e-6 = 10 at step 0 when
+    # all c_k are ~0 (fresh model). Bumping to 1e-2 caps lr_eff at lr/1e-2 =
+    # 1e-3, which is still ~100x the static lr but bounded enough to avoid
+    # divergence in the first few steps.
+    sigma_floor: 1.0e-2
     seed: 0
 
 scheduler:

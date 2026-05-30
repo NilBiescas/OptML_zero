@@ -52,7 +52,7 @@ runai submit \
     git clone https://github.com/NilBiescas/OptML_zero.git
     cd OptML_zero
     git checkout "${BRANCH}"
-    pip install --quiet transformers datasets accelerate wandb pyyaml huggingface_hub
+    pip install --quiet transformers datasets accelerate wandb pyyaml huggingface_hub hf_transfer
     mkdir -p ~/.cache/huggingface && echo "${HF_TOKEN}" > ~/.cache/huggingface/token && chmod 600 ~/.cache/huggingface/token
     accelerate launch --num_processes 1 train.py --config "${CONFIG_FILE}"
   '
