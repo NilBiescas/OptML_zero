@@ -1,0 +1,42 @@
+# Paper-faithful reproduction: FZOO on RoBERTa-large / SST-2 (few-shot).
+# Paper text: BS=32, STEPS=10000, EPS=1e-3, max_seq=128, Nq=8 (best).
+#
+# RUN WITH:
+#   python classificationhead/train.py --config configs/fzoo/roberta_sst2.yaml
+# (root train.py refuses model.classification_head=true configs.)
+
+dataset:
+  template: "mezo"
+  task: "sst2"
+  num_train: 1024
+  num_dev: 256
+  num_eval: 1000
+  fewshot: true
+
+model:
+  name: "roberta-large"
+  freeze_backbone: false
+  classification_head: true
+
+training:
+  epochs: 1
+  batch_size: 32
+  seed: 0
+  max_steps: 10000
+  eval_steps: 1000
+
+optimizer:
+  name: "FZOO"
+  kwargs:
+    lr: 1.0e-6
+    eps: 1.0e-3
+    Nq: 8
+    sigma_floor: 1.0e-6
+    seed: 0
+
+scheduler:
+  type: constant
+
+hub:
+  push_to_hub: false
+  repo_id: null

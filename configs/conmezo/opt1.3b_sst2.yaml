@@ -1,0 +1,43 @@
+# Paper-faithful reproduction: ConMeZO on OPT-1.3B / SST-2.
+# arXiv:2511.02757 — official code: github.com/LejsDeen/ConMeZO
+# Reference script: opt/examples/cone.sh (LR=1e-7, EPS=1e-3, STEPS=20000,
+# CONE_THETA=1.4, CONE_BETA=0.99, BS=16, scheduler constant, SEED 0).
+
+dataset:
+  template: "mezo"
+  task: "sst2"
+  num_train: 1000
+  num_dev: 500
+  num_eval: 1000
+
+model:
+  name: "facebook/opt-1.3b"
+  freeze_backbone: false
+  # fp32: lr=1e-7 ZO updates of ~5e-6 are below fp16 epsilon (~2e-5 at
+  # typical weight scale), causing param updates to round to zero. fp32
+  # uses ~5.2 GB weights + ~5.2 GB mu, well within the 48 GB RTX 4090.
+  dtype: "float32"
+
+training:
+  epochs: 1
+  batch_size: 16
+  seed: 29           # paper script default (paper uses {0, 29, 83})
+  max_steps: 20000
+  eval_steps: 2000
+
+optimizer:
+  name: "ConMeZO"
+  kwargs:
+    lr: 1.0e-7
+    eps: 1.0e-3
+    cone_theta: 1.35           # paper OPT script default
+    cone_beta: 0.99            # paper OPT script default (final β)
+    cone_warmup_total: 20000   # paper §3.4 warm-up sized for 20K-step run
+    seed: 29
+
+scheduler:
+  type: constant
+
+hub:
+  push_to_hub: false
+  repo_id: null

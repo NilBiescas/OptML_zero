@@ -17,6 +17,43 @@ from optimizers.sparse_mezo import SparseMeZO
 from optimizers.dizo import DiZO
 from optimizers.mezo import MeZO
 from optimizers.hizoo import HiZOO
+from optimizers.conmezo import ConMeZO
+from optimizers.fzoo import FZOO
+from optimizers.zo_muon import ZOMuon
+
+
+@torch.no_grad()
+def _compute_paper_acc(model, tokenizer, raw_examples, device):
+    """Per-candidate log-likelihood eval that matches MeZO/ConMeZO/FZOO/
+    ZO-Muon papers. Each example provides (prompt, all_choices, answer_idx);
+    we score each candidate by summed token log-prob given the prompt and
+    pick the argmax. Returns scalar accuracy in [0, 1].
+    """
+    correct = 0
+    n = len(raw_examples)
+    for ex in raw_examples:
+        prompt   = ex["prompt"]
+        choices  = ex["all_choices"]
+        gold_idx = ex["answer_idx"]
+        scores = []
+        prompt_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
+        plen = prompt_ids.size(1)
+        for cand in choices:
+            full_ids = tokenizer(prompt + cand,
+                                 return_tensors="pt").input_ids.to(device)
+            clen = full_ids.size(1) - plen
+            if clen <= 0:
+                scores.append(float("-inf")); continue
+            out = model(full_ids)
+            logp = torch.nn.functional.log_softmax(out.logits[0].float(), dim=-1)
+            total = 0.0
+            for k in range(clen):
+                total += logp[plen - 1 + k, full_ids[0, plen + k]].item()
+            scores.append(total)
+        pred = int(max(range(len(scores)), key=lambda k: scores[k]))
+        if pred == gold_idx:
+            correct += 1
+    return correct / n if n else 0.0
 
 def _try_pull_checkpoint(repo_id: str) -> None:
     """Download last_checkpoint_causal/ from HF Hub into the working directory.
@@ -61,20 +98,29 @@ def main():
     batch_size = train_config.get('batch_size', 16)
     epochs = train_config.get('epochs', 3)
     max_tokens = train_config.get('max_tokens', None)
+    # New: hard step cap (paper-faithful configs set this; the legacy paths
+    # leave it None and let `epochs` drive termination).
+    max_steps = train_config.get('max_steps', None)
     eval_steps = train_config.get('eval_steps', None)
     eval_epochs = train_config.get('eval_epochs', 1)
 
     # Initialize accelerator
     accelerator = Accelerator(log_with="wandb")
     
-    # Try to set the WandB run name to match the RunAI job name
-    run_name = os.environ.get("RUN_NAME", None)
-    wandb_kwargs = {"entity": "nilbiescas3"}
+    # Try to set the WandB run name to match the RunAI job name.
+    # Entity defaults to the wandb-logged-in user; override with WANDB_ENTITY.
+    # Project defaults to WANDB_PROJECT env or the legacy project name.
+    run_name    = os.environ.get("RUN_NAME", None)
+    wandb_entity = os.environ.get("WANDB_ENTITY") or None
+    wandb_kwargs = {}
+    if wandb_entity:
+        wandb_kwargs["entity"] = wandb_entity
     if run_name:
         wandb_kwargs["name"] = run_name
     init_kwargs = {"init_kwargs": {"wandb": wandb_kwargs}}
 
-    accelerator.init_trackers(project_name="lozo-generative-training", config=config, **init_kwargs)
+    project_name = os.environ.get("WANDB_PROJECT", "lozo-generative-training")
+    accelerator.init_trackers(project_name=project_name, config=config, **init_kwargs)
     
     # --- Preemption resume: pull last checkpoint from HF Hub before anything else ---
     resume_state = None
@@ -100,60 +146,138 @@ def main():
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
     
-    dataset_name = dataset_config.get('name', 'mteb/banking77')
-    text_col = dataset_config.get('text_column', 'text')
-    label_col = dataset_config.get('label_column', 'label')
-    
-    accelerator.print(f"Loading dataset {dataset_name}...")
-    dataset = load_dataset(dataset_name, trust_remote_code=True)
-    
+    # Template / dataset dispatch.
+    # - "chat" (default, backward-compatible) -> banking77-style
+    #     "User: <text>\nAssistant: <label>" template loaded from a single
+    #     HF dataset name. This is the original behaviour of the repo.
+    # - "mezo" -> paper-faithful track. Use `data.mezo_tasks.load_mezo_task`
+    #     with the MeZO/ZO-Muon templates, dataset ids, and 1000/500/1000
+    #     sampling protocol. Required for reproducing ZO-Muon / ConMeZO / FZOO
+    #     headline numbers.
+    template_kind = dataset_config.get('template', 'chat')
+
+    # Refuse classification-head configs in this entrypoint: they target the
+    # separate classificationhead/train.py trainer that has its own head and
+    # eval logic. Catch the misroute early so the user can re-run the right
+    # script instead of training the wrong objective for hours.
+    if model_config.get('classification_head'):
+        raise ValueError(
+            "model.classification_head=True is set, which targets "
+            "classificationhead/train.py, not this script. "
+            "Re-run with: python classificationhead/train.py --config <yaml>"
+        )
+
+    # Unified sequence length. Defaults: 128 for the legacy chat path (banking77
+    # is short), 512 for MeZO tasks (SQuAD context can be long). Always overridable
+    # via `training.max_seq_len`.
+    default_max_seq_len = 512 if template_kind == "mezo" else 128
+    max_seq_len = int(train_config.get('max_seq_len', default_max_seq_len))
+
     model_name = model_config.get('name', 'Qwen/Qwen3.5-0.8B')
-    
     accelerator.print(f"Loading tokenizer and causal model: {model_name}...")
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-        
-    # Robustly get/convert label to string
-    has_label_text = "label_text" in dataset["train"].column_names
-    label_names = None
-    if not has_label_text:
-        feature = dataset["train"].features[label_col]
-        if hasattr(feature, "names"):
-            label_names = feature.names
-    # 1. Format the dataset into "User: <text>\nAssistant: <label_name>"
-    def format_example(example):
-        text = example[text_col]
-        # Robust label selection
-        if has_label_text:
-            label = str(example["label_text"])
-        elif label_names is not None:
-            label = str(label_names[example[label_col]])
-        else:
-            label = str(example[label_col])
 
-        prompt = f"User: {text}\nAssistant:"
-        answer = f" {label}"
+    # Raw (prompt, choices, gold_idx) tuples kept around so we can run the
+    # paper-style per-candidate LL eval at every checkpoint. Only populated
+    # for the mezo template path; chat path leaves this None.
+    raw_eval_for_paper_acc = None
 
-        full_text = prompt + answer
+    if template_kind == "mezo":
+        from data.mezo_tasks import load_mezo_task
+        task_name = dataset_config.get('task')
+        if not task_name:
+            raise ValueError(
+                "config.dataset.template == 'mezo' requires "
+                "config.dataset.task (e.g. 'sst2', 'rte', 'boolq', ...)")
+        accelerator.print(f"Loading MeZO-style task '{task_name}'...")
+        num_train = dataset_config.get('num_train', 1000)
+        num_dev   = dataset_config.get('num_dev', 500)
+        num_eval  = dataset_config.get('num_eval', 1000)
+        formatted_dataset = load_mezo_task(
+            task_name, seed=seed,
+            num_train=num_train, num_dev=num_dev, num_eval=num_eval,
+        )
 
-        # Tokenize the prompt to find where the assistant's answer starts
-        prompt_tokenized = tokenizer(prompt, truncation=True, max_length=128)
-        answer_start = len(prompt_tokenized["input_ids"])
+        # Capture raw eval examples BEFORE column-stripping, for the
+        # per-candidate LL eval that matches paper accuracy.
+        if "validation" in formatted_dataset:
+            raw_eval_for_paper_acc = [
+                {"prompt":      ex["prompt"],
+                 "all_choices": list(ex["all_choices"]),
+                 "answer_idx":  int(ex["answer_idx"])}
+                for ex in formatted_dataset["validation"]
+            ]
+            accelerator.print(
+                f"Captured {len(raw_eval_for_paper_acc)} raw eval examples "
+                f"for paper-style per-candidate accuracy"
+            )
 
-        return {
-            "formatted_text": full_text,
-            "answer_start": answer_start
-        }
-        
-    accelerator.print("Formatting dataset into conversational templates...")
-    with accelerator.main_process_first():
-        formatted_dataset = dataset.map(format_example, remove_columns=dataset["train"].column_names)
+        # Compute answer_start per example for label-masking in tokenise step.
+        # CRITICAL: must use the SAME max_length as tokenize_function below,
+        # otherwise answer_start can index past the truncated input_ids and
+        # the loss mask is silently wrong.
+        def add_answer_start(example):
+            prompt_tok = tokenizer(example["prompt"], truncation=True,
+                                   max_length=max_seq_len)
+            return {"answer_start": len(prompt_tok["input_ids"])}
+        with accelerator.main_process_first():
+            formatted_dataset = formatted_dataset.map(
+                add_answer_start,
+                remove_columns=[c for c in formatted_dataset["train"].column_names
+                                if c not in ("formatted_text",)],
+            )
+    else:
+        dataset_name = dataset_config.get('name', 'mteb/banking77')
+        text_col = dataset_config.get('text_column', 'text')
+        label_col = dataset_config.get('label_column', 'label')
+
+        accelerator.print(f"Loading dataset {dataset_name}...")
+        dataset = load_dataset(dataset_name, trust_remote_code=True)
+
+        # Robustly get/convert label to string
+        has_label_text = "label_text" in dataset["train"].column_names
+        label_names = None
+        if not has_label_text:
+            feature = dataset["train"].features[label_col]
+            if hasattr(feature, "names"):
+                label_names = feature.names
+        # 1. Format the dataset into "User: <text>\nAssistant: <label_name>"
+        def format_example(example):
+            text = example[text_col]
+            # Robust label selection
+            if has_label_text:
+                label = str(example["label_text"])
+            elif label_names is not None:
+                label = str(label_names[example[label_col]])
+            else:
+                label = str(example[label_col])
+
+            prompt = f"User: {text}\nAssistant:"
+            answer = f" {label}"
+
+            full_text = prompt + answer
+
+            # Tokenize the prompt to find where the assistant's answer starts.
+            # Use the unified max_seq_len so it matches tokenize_function.
+            prompt_tokenized = tokenizer(prompt, truncation=True, max_length=max_seq_len)
+            answer_start = len(prompt_tokenized["input_ids"])
+
+            return {
+                "formatted_text": full_text,
+                "answer_start": answer_start
+            }
+
+        accelerator.print("Formatting dataset into conversational templates...")
+        with accelerator.main_process_first():
+            formatted_dataset = dataset.map(format_example, remove_columns=dataset["train"].column_names)
         
     # 2. Tokenize the formatted text
     def tokenize_function(examples):
-        # We also need to keep answer_start to use it in add_labels
-        tokenized = tokenizer(examples["formatted_text"], truncation=True, max_length=128)
+        # Same max_length as the answer_start tokenisation so labels line up.
+        tokenized = tokenizer(examples["formatted_text"], truncation=True,
+                              max_length=max_seq_len)
         tokenized["answer_start"] = examples["answer_start"]
         return tokenized
         
@@ -188,11 +312,29 @@ def main():
                 "test": tokenized_datasets["test"]
             })
             
-    # Load model — from local checkpoint when resuming, otherwise from HF Hub
+    # Load model — from local checkpoint when resuming, otherwise from HF Hub.
+    # Honour config.model.dtype ("float16" / "bfloat16" / "float32") if set, so
+    # OPT-1.3B / OPT-13B paper-reproduction configs actually run in fp16 instead
+    # of the default float32.
     _ckpt_dir = "last_checkpoint_causal"
     _model_src = _ckpt_dir if (resume_state and os.path.exists(_ckpt_dir)) else model_name
     accelerator.print(f"Loading model from: {_model_src}")
-    model = AutoModelForCausalLM.from_pretrained(_model_src, trust_remote_code=True)
+    _dtype_map = {"float16": torch.float16, "fp16": torch.float16,
+                  "bfloat16": torch.bfloat16, "bf16": torch.bfloat16,
+                  "float32": torch.float32, "fp32": torch.float32}
+    _from_pretrained_kwargs = {"trust_remote_code": True}
+    # transformers 5.x + torch < 2.6 refuses .bin files (CVE-2025-32434);
+    # force safetensors which doesn't go through torch.load.
+    _from_pretrained_kwargs["use_safetensors"] = bool(
+        model_config.get('use_safetensors', True))
+    _dtype_str = model_config.get('dtype')
+    if _dtype_str:
+        if _dtype_str not in _dtype_map:
+            raise ValueError(f"Unknown model.dtype '{_dtype_str}'. "
+                             f"Known: {sorted(_dtype_map)}")
+        _from_pretrained_kwargs["torch_dtype"] = _dtype_map[_dtype_str]
+        accelerator.print(f"Loading model in {_dtype_str}")
+    model = AutoModelForCausalLM.from_pretrained(_model_src, **_from_pretrained_kwargs)
     model.config.pad_token_id = tokenizer.pad_token_id
     
     # Use DataCollatorForSeq2Seq which handles dynamic padding of inputs and pads labels with -100
@@ -243,7 +385,10 @@ def main():
     opt_name = opt_config.get('name', 'LOZO')
     opt_kwargs = opt_config.get('kwargs', {})
     
-    is_zeroth_order = opt_name in ["LOZO", "LOZOM", "SparseMeZO", "DiZO", "MeZO", "HiZOO"]
+    is_zeroth_order = opt_name in [
+        "LOZO", "LOZOM", "SparseMeZO", "DiZO", "MeZO", "HiZOO",
+        "ConMeZO", "FZOO", "ZOMuon",
+    ]
 
     if is_zeroth_order:
         model.to(accelerator.device)
@@ -257,6 +402,12 @@ def main():
             optimizer = MeZO(model.parameters(), **opt_kwargs)
         elif opt_name == "HiZOO":
             optimizer = HiZOO(model.parameters(), **opt_kwargs)
+        elif opt_name == "ConMeZO":
+            optimizer = ConMeZO(model.parameters(), **opt_kwargs)
+        elif opt_name == "FZOO":
+            optimizer = FZOO(model.parameters(), **opt_kwargs)
+        elif opt_name == "ZOMuon":
+            optimizer = ZOMuon(model.parameters(), **opt_kwargs)
         else:
             optimizer = LOZO(model.parameters(), **opt_kwargs)
 
@@ -378,12 +529,14 @@ def main():
     
     global_step       = resume_state['global_step']       if resume_state else 0
     best_eval_loss    = resume_state['best_eval_loss']    if resume_state else float('inf')
+    best_paper_acc    = (resume_state.get('best_paper_acc', -1.0)
+                         if resume_state else -1.0)
     total_tokens_seen = resume_state['total_tokens_seen'] if resume_state else 0
     epoch             = resume_state['epoch']             if resume_state else 0
     run_start_time = time.time()
 
     def run_evaluation(curr_epoch, curr_global_step):
-        nonlocal best_eval_loss
+        nonlocal best_eval_loss, best_paper_acc
         if not eval_dataloader:
             return
         
@@ -424,22 +577,58 @@ def main():
         perplexity = math.exp(avg_eval_loss) if avg_eval_loss < 20 else float('inf')
         token_acc = correct_tokens / total_tokens if total_tokens > 0 else 0.0
         elapsed_since_start = time.time() - run_start_time
-        
-        accelerator.print(f"Eval: Epoch {curr_epoch+1} | Step {curr_global_step} | Loss: {avg_eval_loss:.4f} | Perplexity: {perplexity:.2f} | Token Accuracy: {token_acc:.4f}")
-        accelerator.log({
+
+        # Paper-style per-candidate LL eval (MeZO/ConMeZO/FZOO/ZO-Muon
+        # publish numbers under this metric, NOT per-token argmax). Cheap:
+        # ~3s on a 1000-example eval set with OPT-1.3B on a 4090.
+        paper_acc = None
+        if raw_eval_for_paper_acc is not None and accelerator.is_local_main_process:
+            paper_acc = _compute_paper_acc(
+                eval_unwrapped_model, tokenizer,
+                raw_eval_for_paper_acc, accelerator.device
+            )
+
+        log_dict = {
             "eval_loss": avg_eval_loss,
             "perplexity": perplexity,
             "eval_token_accuracy": token_acc,
             "total_elapsed_time_sec": elapsed_since_start,
             "epoch": curr_epoch+1
-        }, step=curr_global_step)
-        
+        }
+        if paper_acc is not None:
+            log_dict["paper_acc"] = paper_acc
+
+        msg = (f"Eval: Epoch {curr_epoch+1} | Step {curr_global_step} | "
+               f"Loss: {avg_eval_loss:.4f} | Perplexity: {perplexity:.2f} | "
+               f"Token Accuracy: {token_acc:.4f}")
+        if paper_acc is not None:
+            msg += f" | Paper-Acc: {paper_acc*100:.2f}%"
+        accelerator.print(msg)
+        accelerator.log(log_dict, step=curr_global_step)
+
         if accelerator.is_local_main_process:
             accelerator.print("Saving checkpoints on main process...")
             unwrapped_model = accelerator.unwrap_model(model)
-            if avg_eval_loss < best_eval_loss:
-                best_eval_loss = avg_eval_loss
-                accelerator.print(f"New best validation loss ({avg_eval_loss:.4f})! Saving and pushing best_checkpoint_causal...")
+            # Save best by paper accuracy when available; fall back to lowest
+            # eval loss for the legacy chat-template path.
+            if paper_acc is not None:
+                improved = paper_acc > best_paper_acc
+                metric_name = "paper_acc"
+                metric_value = paper_acc
+                if improved:
+                    best_paper_acc = paper_acc
+            else:
+                improved = avg_eval_loss < best_eval_loss
+                metric_name = "loss"
+                metric_value = avg_eval_loss
+                if improved:
+                    best_eval_loss = avg_eval_loss
+
+            if improved:
+                accelerator.print(
+                    f"New best {metric_name} ({metric_value:.4f})! "
+                    f"Saving best_checkpoint_causal..."
+                )
                 unwrapped_model.save_pretrained("best_checkpoint_causal")
                 tokenizer.save_pretrained("best_checkpoint_causal")
                 
@@ -468,6 +657,7 @@ def main():
                     "epoch":             curr_epoch + 1,
                     "global_step":       curr_global_step,
                     "best_eval_loss":    best_eval_loss,
+                    "best_paper_acc":    best_paper_acc,
                     "total_tokens_seen": total_tokens_seen,
                 }, _sf)
             torch.save(optimizer.state_dict(), "last_checkpoint_causal/optimizer_state.pt")
@@ -493,7 +683,11 @@ def main():
         accelerator.print(f"--- Evaluation Complete ---\n")
 
     while True:
-        if max_tokens is None and epoch >= epochs:
+        # Outer-loop termination: max_steps takes precedence, then max_tokens,
+        # then epoch count. The inner loop applies the same logic per step.
+        if max_steps is not None and global_step >= max_steps:
+            break
+        if max_steps is None and max_tokens is None and epoch >= epochs:
             break
             
         if is_zeroth_order:
@@ -582,8 +776,20 @@ def main():
 
             accelerator.log(log_metrics, step=global_step)
             global_step += 1
-            
-            
+
+            # Step-based eval: trigger every eval_steps optimizer steps in
+            # addition to the per-epoch trigger below.
+            if eval_steps is not None and global_step > 0 and global_step % eval_steps == 0:
+                run_evaluation(epoch, global_step)
+                if is_zeroth_order:
+                    model.eval()
+                else:
+                    model.train()
+
+            if max_steps is not None and global_step >= max_steps:
+                accelerator.print(f"Reached max_steps ({max_steps}). Stopping training loop.")
+                break
+
             if max_tokens is not None and total_tokens_seen >= max_tokens:
                 accelerator.print(f"Reached max_tokens ({max_tokens}). Stopping training loop.")
                 break

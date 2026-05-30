@@ -1,0 +1,46 @@
+# Paper-faithful reproduction: ConMeZO on RoBERTa-large / SST-2 (few-shot).
+# Reference script: roberta/examples/cone.sh (LR=1e-6, EPS=1e-3, STEP=10000,
+# CONE_THETA=1.35, CONE_BETA=0.95, BS=64, K=512 samples/class, classification
+# head, 5 seeds {13, 21, 42, 87, 100}).
+#
+# RUN WITH:
+#   python classificationhead/train.py --config configs/conmezo/roberta_sst2.yaml
+# NOT with the root train.py — root train.py will refuse this config because
+# model.classification_head=true. The classificationhead/ trainer owns the
+# RoBERTa classification head and head-specific eval.
+
+dataset:
+  template: "mezo"
+  task: "sst2"
+  num_train: 1024     # K=512 * 2 classes
+  num_dev: 256
+  num_eval: 1000
+  fewshot: true
+
+model:
+  name: "roberta-large"
+  freeze_backbone: false
+  classification_head: true
+
+training:
+  epochs: 1
+  batch_size: 64
+  seed: 13
+  max_steps: 10000
+  eval_steps: 1000
+
+optimizer:
+  name: "ConMeZO"
+  kwargs:
+    lr: 1.0e-6
+    eps: 1.0e-3
+    cone_theta: 1.35
+    cone_beta: 0.95
+    seed: 13
+
+scheduler:
+  type: constant
+
+hub:
+  push_to_hub: false
+  repo_id: null

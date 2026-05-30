@@ -1,0 +1,47 @@
+# Paper-faithful reproduction: FZOO on OPT-1.3B / SST-2.
+# arXiv:2506.09034 — hyperparameters from Table 10 (OPT) + Table 14
+# (perturbation count ablation on SST-2 / OPT-125M):
+#   batch size:  16
+#   learning rate: 1e-5..5e-4 grid (paper Table 10); we pick 1e-5 (lowest,
+#                  most stable; paper's grid corner)
+#   mu (=eps):   1e-3 (paper grid {1e-3, 5e-4, 1e-4})
+#   N (Nq):      8     (Table 14 ablation: best at N=8 on SST-2)
+#   weight decay: 0   (paper uses constant LR, no WD)
+# Step budget: paper's OPT loss curves run to 40,000 forward steps total;
+# with Nq=8 that's ~4,000 optimizer steps. We use 4000 to match.
+# Headline result (Table 7): FZOO FT 90.7%  vs MeZO 90.8%  on OPT-1.3B SST-2.
+
+dataset:
+  template: "mezo"
+  task: "sst2"
+  num_train: 1000
+  num_dev: 500
+  num_eval: 1000
+
+model:
+  name: "facebook/opt-1.3b"
+  freeze_backbone: false
+  dtype: "float32"  # avoid fp16 update-rounding (see conmezo config note)
+
+training:
+  epochs: 1
+  batch_size: 16
+  seed: 0
+  max_steps: 4000
+  eval_steps: 500
+
+optimizer:
+  name: "FZOO"
+  kwargs:
+    lr: 1.0e-5
+    eps: 1.0e-3
+    Nq: 8
+    sigma_floor: 1.0e-6
+    seed: 0
+
+scheduler:
+  type: constant
+
+hub:
+  push_to_hub: false
+  repo_id: null
