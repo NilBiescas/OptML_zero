@@ -7,7 +7,7 @@ GASPAR="nil"
 
 GPUS=1
 NODE="${NODE:-a100-40g}"
-PROJECT="vilab-${GASPAR}"
+PROJECT="dhlab-${GASPAR}"
 IMAGE="registry.rcp.epfl.ch/course-cs-552/base-vllm:v1"
 
 # Source environment variables
@@ -17,9 +17,9 @@ elif [ -f .env ]; then
     export $(grep -v '^#' .env | xargs)
 fi
 
-echo ">>> Submitting preemptible training job for PseuZO on CB (${GPUS} GPUs)"
+echo ">>> Submitting preemptible training job for PseuZO on SST2 and RTE (${GPUS} GPUs)"
 
-for DATASET in cb; do
+for DATASET in SST2 RTE; do
   JOB_NAME="${GASPAR}-pseuzo-${DATASET}-$(date +%H%M%S)"
 
   runai submit \
@@ -34,7 +34,7 @@ for DATASET in cb; do
     --environment HF_TOKEN="${HF_TOKEN:-}" \
     --environment RUN_NAME="${JOB_NAME}" \
     --environment GITHUB_TOKEN="${GITHUB_TOKEN:-}" \
-    --command -- bash -c "ln -sf /usr/bin/python3 /usr/bin/python && git clone -b nil_branch https://\${GITHUB_TOKEN}@github.com/NilBiescas/OptML_zero.git && cd OptML_zero/PseuZO && pip install -r requirements.txt && CUDA_VISIBLE_DEVICES=0 TRAINER=pzo MODEL=facebook/opt-1.3b TASK=\$(echo \${DATASET} | tr '[:lower:]' '[:upper:]') MODE=ft LR=1e-7 EPS=1e-3 BS=16 STEPS=10000 bash mezo.sh"
+    --command -- bash -c "ln -sf /usr/bin/python3 /usr/bin/python && git clone -b nil_branch https://\${GITHUB_TOKEN}@github.com/NilBiescas/OptML_zero.git && cd OptML_zero/PseuZO && pip install -r requirements.txt && TRAIN=1025 DEV=512 CUDA_VISIBLE_DEVICES=0 TRAINER=pzo MODEL=facebook/opt-1.3b TASK=\${DATASET} MODE=ft LR=1e-7 EPS=1e-3 BS=16 STEPS=10000 EVAL_STEPS=2000 bash mezo.sh"
 
   echo ">>> Job submitted: ${JOB_NAME}"
 done

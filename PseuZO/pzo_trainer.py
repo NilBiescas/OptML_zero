@@ -300,7 +300,8 @@ class PZOTrainer(Trainer):
         )
 
         
-        self.sliding_window_length = 14
+        import os
+        self.sliding_window_length = int(os.environ.get("SLIDING_WINDOW_LENGTH", "14"))
         self.sliding_window = deque(maxlen=self.sliding_window_length)
         self.coefficients = []
         self.momentum_fb_min = 0.0
@@ -427,8 +428,11 @@ class PZOTrainer(Trainer):
                 #self.reset_momentum_fb(hyperbola_restart(epoch-epochs_trained))
                 #self.reset_momentum_fb(admm_4_1(epoch-epochs_trained))
                 #self.reset_momentum_fb(fixed(0.9))
-                self.reset_momentum_fb(cyclic_hyperbola(epoch-epochs_trained,num_train_epochs-epochs_trained,2))
-                #self.reset_momentum_fb(exp_annealing(epoch-epochs_trained))
+                momentum_env = os.environ.get("MOMENTUM_FB", None)
+                if momentum_env is not None:
+                    self.reset_momentum_fb(float(momentum_env))
+                else:
+                    self.reset_momentum_fb(cyclic_hyperbola(epoch-epochs_trained,num_train_epochs-epochs_trained,2))
             if isinstance(train_dataloader, DataLoader) and isinstance(train_dataloader.sampler, DistributedSampler):
                 train_dataloader.sampler.set_epoch(epoch)
             elif hasattr(train_dataloader, "dataset") and isinstance(train_dataloader.dataset, IterableDatasetShard):
@@ -715,20 +719,50 @@ class PZOTrainer(Trainer):
                 param.data = param.data - self._get_learning_rate() * (self.projected_grad * z)
 
         self.lr_scheduler.step()
+
+    def log(self, logs: Dict[str, float]) -> None:
+        import os
+        import torch
+        
+        # Add current training step
+        if getattr(self, 'state', None) is not None:
+            logs["timestep"] = self.state.global_step
+            logs["steps_to_best_eval"] = self.state.global_step
+            
+        # Add GPU memory consumption in GB
+        if torch.cuda.is_available():
+            logs["gpu_consumption_gb"] = torch.cuda.max_memory_allocated() / (1024 ** 3)
+            
+        # Add momentum parameter if available
+        if getattr(self, 'momentum_fb', None) is not None:
+            logs["momentum_fb"] = self.momentum_fb
+            
+        # Standardize evaluation metric names
+        for k, v in list(logs.items()):
+            if k == "eval_accuracy":
+                logs["val_accuracy"] = v
+            elif k == "eval_f1":
+                logs["val_f1"] = v
+            elif k == "eval_loss":
+                logs["val_loss"] = v
+                
+        super().log(logs)
+
     ############## My Sliding Window ZO ##############
     
     def reset_momentum_fb(self,momentum_fb):
+        import os
         self.momentum_fb = momentum_fb
-        if self.momentum_fb == self.momentum_fb_min:
+        if self.momentum_fb == self.momentum_fb_min and os.environ.get("FORCE_PZO", "False") != "True":
             self.args.trainer = "zo"
             #self.args.learning_rate = zo_ft_lr
             self.model.forward = forward_wrap_with_option_len.__get__(self.model, type(self.model))
         else:
-            if self.momentum_fb == self.momentum_fb_max:
-                self.args.trainer = "pzo"
-            #    self.args.learning_rate = pzo_ft_lr  
-                self.model.forward = forward_wrap_with_option_len_pzo.__get__(self.model, type(self.model))
+            self.args.trainer = "pzo"
+            self.model.forward = forward_wrap_with_option_len_pzo.__get__(self.model, type(self.model))
+            if not hasattr(self, 'sliding_window') or len(self.sliding_window) == 0:
                 self.sliding_window = deque(maxlen=self.sliding_window_length)
+            self.coefficients = []
             for i in range(self.sliding_window_length):
                 if i == 0:
                     self.coefficients.append(1.0)

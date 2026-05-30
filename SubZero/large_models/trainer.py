@@ -24,7 +24,7 @@ import sys
 import time
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Optional, Dict
 
 import numpy as np
 import torch
@@ -132,6 +132,30 @@ class OurTrainer(Trainer):
         self.writer = writer
         self.p_state = dict()
         self.update_steps = 0
+        
+    def log(self, logs: Dict[str, float]) -> None:
+        import os
+        import torch
+        
+        # Add current training step
+        if getattr(self, 'state', None) is not None:
+            logs["timestep"] = self.state.global_step
+            logs["steps_to_best_eval"] = self.state.global_step
+            
+        # Add GPU memory consumption in GB
+        if torch.cuda.is_available():
+            logs["gpu_consumption_gb"] = torch.cuda.max_memory_allocated() / (1024 ** 3)
+            
+        # Standardize evaluation metric names
+        for k, v in list(logs.items()):
+            if k == "eval_accuracy":
+                logs["val_accuracy"] = v
+            elif k == "eval_f1":
+                logs["val_f1"] = v
+            elif k == "eval_loss":
+                logs["val_loss"] = v
+                
+        super().log(logs)
         
     def _inner_training_loop(
             self, batch_size=None, args=None, resume_from_checkpoint=None, trial=None, ignore_keys_for_eval=None

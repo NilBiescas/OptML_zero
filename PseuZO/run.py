@@ -108,7 +108,8 @@ class OurArguments(TrainingArguments):
 
     # Auto saving when interrupted
     save_on_interrupt: bool = False # save model when interrupted (useful for long training)
-    report_to: str = "none" # no wandb
+    import os
+    report_to: str = "wandb" if os.environ.get("WANDB_API_KEY") else "none"
 def parse_args():
     parser = argparse.ArgumentParser()
     parser = HfArgumentParser(OurArguments)
@@ -486,7 +487,14 @@ class Framework:
         if self.args.resume_from_checkpoint is not None:
             last_checkpoint = self.args.resume_from_checkpoint
 
-        trainer.train(resume_from_checkpoint=last_checkpoint) 
+        train_output = trainer.train(resume_from_checkpoint=last_checkpoint) 
+        self.train_output = train_output
+        self.best_step = None
+        if getattr(trainer, 'state', None) is not None and getattr(trainer.state, 'best_model_checkpoint', None) is not None:
+            try:
+                self.best_step = int(trainer.state.best_model_checkpoint.split("-")[-1])
+            except:
+                pass
 
         # Explicitly save the model
         if self.args.save_model:
@@ -495,6 +503,50 @@ class Framework:
         
         # FSDP compatibility
         self.model = trainer.model 
+        
+        # Upload best model to Hugging Face Hub
+        if trainer.is_world_process_zero():
+            hf_token = os.environ.get("HF_TOKEN")
+            if hf_token:
+                try:
+                    from huggingface_hub import HfApi
+                    api = HfApi(token=hf_token)
+                    
+                    user_info = api.whoami()
+                    username = user_info['name']
+                    model_clean_name = self.args.model_name.split('/')[-1]
+                    repo_name = f"{username}/pseuzo-best-{self.args.task_name}-{model_clean_name}"
+                    
+                    logger.info(f"Creating and pushing best model to Hugging Face Hub: {repo_name}")
+                    api.create_repo(repo_id=repo_name, exist_ok=True, private=True)
+                    
+                    trainer.model.push_to_hub(repo_name, token=hf_token, safe_serialization=False)
+                    self.tokenizer.push_to_hub(repo_name, token=hf_token)
+                    logger.info("Successfully pushed model to Hugging Face Hub!")
+                except Exception as e:
+                    logger.error(f"Failed to push model to Hugging Face Hub: {e}")
+
+        # Log best step (timestep and evalstep) of the best model to WandB
+        if trainer.is_world_process_zero():
+            best_step = None
+            if getattr(trainer, 'state', None) is not None and getattr(trainer.state, 'best_model_checkpoint', None) is not None:
+                try:
+                    best_step = int(trainer.state.best_model_checkpoint.split("-")[-1])
+                except:
+                    pass
+            if best_step is not None:
+                try:
+                    import wandb
+                    if wandb.run is not None:
+                        wandb.log({
+                            "test_model_timestep": best_step,
+                            "test_model_evalstep": best_step,
+                            "test/timestep": best_step,
+                            "test/evalstep": best_step
+                        })
+                        logger.info(f"Logged to WandB: test_model_timestep={best_step}, test_model_evalstep={best_step}")
+                except Exception as e:
+                    logger.warning(f"Could not log best model step to WandB: {e}")
         
         # Reset the forward function for evaluation
         if self.args.only_train_option and not self.args.non_diff:
@@ -520,7 +572,8 @@ def result_file_tag(args):
 
 
 def main():
-    os.environ["WANDB_MODE"] = "disabled"
+    if not os.environ.get("WANDB_API_KEY"):
+        os.environ["WANDB_MODE"] = "disabled"
     args = parse_args()
 
     set_seed(args.seed)
@@ -566,6 +619,41 @@ def main():
             if not args.no_eval:
                 logger.info("===== Train set %d =====" % train_set_seed)
                 logger.info(metrics)
+                if args.trainer != "none" and args.local_rank <= 0:
+                    try:
+                        import wandb
+                        if wandb.run is not None:
+                            best_step = getattr(framework, 'best_step', None)
+                            train_loss = getattr(framework.train_output, 'train_loss', None) if getattr(framework, 'train_output', None) is not None else None
+                            
+                            # GPU Memory consumption in GB
+                            gpu_mem_gb = torch.cuda.max_memory_allocated() / (1024 ** 3) if torch.cuda.is_available() else 0.0
+                            
+                            log_dict = {
+                                "timestep": best_step,
+                                "steps_to_best_eval": best_step,
+                                "gpu_consumption_gb": gpu_mem_gb
+                            }
+                            
+                            if train_loss is not None:
+                                log_dict["train_loss"] = train_loss
+                            
+                            # Extract val / eval metrics
+                            for k, v in metrics.items():
+                                log_dict[k] = v
+                                if k == "accuracy":
+                                    log_dict["val_accuracy"] = v
+                                elif k == "dev_accuracy":
+                                    log_dict["dev_val_accuracy"] = v
+                                elif k == "f1":
+                                    log_dict["val_f1"] = v
+                                elif k == "dev_f1":
+                                    log_dict["dev_val_f1"] = v
+                                
+                            wandb.log(log_dict)
+                            logger.info(f"Successfully logged comprehensive metrics to WandB: {log_dict}")
+                    except Exception as e:
+                        logger.warning(f"Could not log final metrics to WandB: {e}")
                 if args.local_rank <= 0:
                     write_metrics_to_file(metrics, "/data1/xlyang/MeZO/result/" +  result_file_tag(args) + f"-trainset{train_set_id}.json" if args.result_file is None else args.result_file)
 

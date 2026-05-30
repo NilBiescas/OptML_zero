@@ -1109,6 +1109,21 @@ def main():
                         writer.write("%s = %s\n" % (key, value))
                         final_result[test_dataset.args.task_name + '_test_' + key] = value
 
+                try:
+                    import wandb
+                    if wandb.run is not None:
+                        best_step = getattr(trainer, 'best_step', None)
+                        if best_step is not None:
+                            wandb.log({
+                                "test_model_timestep": best_step,
+                                "test_model_evalstep": best_step,
+                                "test/timestep": best_step,
+                                "test/evalstep": best_step
+                            })
+                            logger.info(f"Logged to WandB: test_model_timestep={best_step}, test_model_evalstep={best_step}")
+                except Exception as e:
+                    logger.warning(f"Could not log test model step to WandB: {e}")
+
                 if training_args.save_logit:
                     predictions = output.predictions
                     num_logits = predictions.shape[-1]
