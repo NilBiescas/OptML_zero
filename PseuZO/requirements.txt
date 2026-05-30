@@ -3,3 +3,6 @@ scikit-learn
 datasets
 accelerate
 transformers
+modelscope
+addict
+loralib
