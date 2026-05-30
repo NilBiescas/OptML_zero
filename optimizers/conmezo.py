@@ -122,9 +122,17 @@ class ConMeZO(Optimizer):
                 z = torch.randn(p.shape, dtype=p.dtype, device=p.device,
                                 generator=state['generator'])
 
-                # ConMeZO cone bias. Work entirely in fp32 for direction math,
-                # cast back to p.dtype only when forming z' for the actual
-                # parameter perturbation.
+                # ConMeZO cone bias. Paper Algorithm 1 / Eq. 6:
+                #   z_t = sqrt(d) * (cos(theta) * mu_hat + sin(theta) * u_t)
+                # i.e. PARALLEL (mu) component gets cos(theta), and the
+                # ORTHOGONAL (random) component gets sin(theta). At theta=1.35
+                # this is a WIDE cone (~0.98 random, ~0.22 mu) -- intentional
+                # exploration with a soft bias toward momentum.
+                #
+                # Earlier we had cos and sin swapped (cos on z, sin on mu_hat),
+                # producing a NARROW cone that locked the model into the
+                # initial-momentum direction (mode collapse to ~55% paper-acc
+                # on OPT-1.3B SST-2). Fixed in this commit.
                 mu = state['mu']                       # fp32
                 mu_norm_sq = mu.pow(2).sum()           # fp32 scalar
                 if state['step'] == 0 or mu_norm_sq.item() < 1e-24:
@@ -135,9 +143,11 @@ class ConMeZO(Optimizer):
                     z_fp32  = z.float()
                     z_norm  = z_fp32.pow(2).sum().sqrt()
                     mu_hat  = mu / mu_norm             # fp32 / fp32 -> fp32
-                    # z' = sqrt(1-alpha^2) * z + alpha * ||z|| * mu_hat
-                    z_prime_fp32 = z_fp32.mul(scale).add_(mu_hat,
-                                                          alpha=(alpha * z_norm).item())
+                    # Paper: z' = sin(theta) * z + cos(theta) * ||z|| * mu_hat
+                    #         = alpha * z + scale * ||z|| * mu_hat
+                    # (note: alpha=sin, scale=cos, swapped from previous code)
+                    z_prime_fp32 = z_fp32.mul(alpha).add_(mu_hat,
+                                                          alpha=(scale * z_norm).item())
                     z_prime = z_prime_fp32.to(p.dtype)
 
                 state['z'] = z_prime
