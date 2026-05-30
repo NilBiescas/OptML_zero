@@ -187,6 +187,10 @@ except ImportError:
     TrainerMemoryTracker = None
     FSDPOption = None
 try:
+    from transformers.trainer_utils import ShardedDDPOption
+except ImportError:
+    ShardedDDPOption = None
+try:
     from transformers.training_args import OptimizerNames, ParallelMode, TrainingArguments
 except ImportError:
     from transformers import TrainingArguments
@@ -281,7 +285,10 @@ SCALER_NAME = "scaler.pt"
 
 
 class OurTrainer(Trainer):
-    from transformers.trainer_pt_utils import _get_learning_rate, log_metrics, metrics_format, save_metrics, save_state
+    try:
+        from transformers.trainer_pt_utils import _get_learning_rate, log_metrics, metrics_format, save_metrics, save_state
+    except ImportError:
+        pass
 
     def log(self, logs: Dict[str, float], *args, **kwargs) -> None:
         import os
@@ -1418,7 +1425,7 @@ class OurTrainer(Trainer):
                 # 'user_content.pt' indicates model state_dict saved with smp >= 1.10
                 Path(os.path.join(output_dir, "user_content.pt")).touch()
         elif (
-            (ShardedDDPOption is not None and (
+            (ShardedDDPOption is not None and hasattr(self.args, 'sharded_ddp') and (
                 ShardedDDPOption.ZERO_DP_2 in self.args.sharded_ddp
                 or ShardedDDPOption.ZERO_DP_3 in self.args.sharded_ddp
             ))
