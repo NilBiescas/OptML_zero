@@ -138,8 +138,8 @@ class CopaDataset(Dataset):
     def load_dataset(self, path, **kwargs):
         #train_examples = load_dataset('super_glue', "copa")["train"]
         #valid_examples = load_dataset('super_glue', "copa")["validation"]
-        train_examples = MsDataset.load(trust_remote_code=True, "super_glue",subset_name="copa",split="train")
-        valid_examples = MsDataset.load(trust_remote_code=True, 'super_glue',subset_name="copa",split="validation")
+        train_examples = MsDataset.load("super_glue",subset_name="copa",split="train", trust_remote_code=True)
+        valid_examples = MsDataset.load('super_glue',subset_name="copa",split="validation", trust_remote_code=True)
         train_samples = [self.build_sample(example) for example in train_examples]
         valid_samples = [self.build_sample(example) for example in valid_examples]
         self.samples = {"train": train_samples, "valid": valid_samples}
@@ -194,7 +194,7 @@ class MultiRCDataset(Dataset):
     
     def load_dataset(self, path, **kwargs):
         #d = load_dataset("super_glue", "multirc")
-        d = MsDataset.load(trust_remote_code=True, "super_glue",subset_name="multirc")
+        d = MsDataset.load("super_glue",subset_name="multirc", trust_remote_code=True)
         train_set = d["train"]
         valid_set = d["validation"]
 
@@ -223,7 +223,7 @@ class CBDataset(Dataset):
     
     def load_dataset(self, path, **kwargs):
         #d = load_dataset("super_glue", "cb")
-        d = MsDataset.load(trust_remote_code=True, "super_glue",subset_name="cb")
+        d = MsDataset.load("super_glue",subset_name="cb", trust_remote_code=True)
         train_set = d["train"]
         valid_set = d["validation"]
 
@@ -252,7 +252,7 @@ class WICDataset(Dataset):
     
     def load_dataset(self, path, **kwargs):
         #d = load_dataset("super_glue", "wic")
-        d = MsDataset.load(trust_remote_code=True, "super_glue",subset_name="wic")
+        d = MsDataset.load("super_glue",subset_name="wic", trust_remote_code=True)
         train_set = d["train"]
         valid_set = d["validation"]
 
@@ -281,7 +281,7 @@ class WSCDataset(Dataset):
     
     def load_dataset(self, path, **kwargs):
         #d = load_dataset("super_glue", "wsc.fixed")
-        d = MsDataset.load(trust_remote_code=True, "super_glue",subset_name="wsc")
+        d = MsDataset.load("super_glue",subset_name="wsc", trust_remote_code=True)
         train_set = d["train"]
         valid_set = d["validation"]
 
@@ -310,7 +310,7 @@ class ReCoRDDataset(Dataset):
     
     def load_dataset(self, path, **kwargs):
         #d = load_dataset("super_glue", "record")
-        d = MsDataset.load(trust_remote_code=True, "super_glue",subset_name="record")
+        d = MsDataset.load("super_glue",subset_name="record", trust_remote_code=True)
         train_set = d["train"]
         valid_set = d["validation"]
 
@@ -339,7 +339,7 @@ class RTEDataset(Dataset):
     
     def load_dataset(self, path, **kwargs):
         #d = load_dataset("super_glue", "rte")
-        d = MsDataset.load(trust_remote_code=True, "super_glue",subset_name="rte")
+        d = MsDataset.load("super_glue",subset_name="rte", trust_remote_code=True)
         train_set = d["train"]
         valid_set = d["validation"]
 

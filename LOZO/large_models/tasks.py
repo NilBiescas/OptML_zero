@@ -110,7 +110,7 @@ class SST2Dataset(Dataset):
         self.load_dataset(subtask, **kwargs)
         
     def load_dataset(self, path, **kwargs):
-        d = load_dataset(trust_remote_code=True, 'glue', 'sst2')
+        d = load_dataset('glue', 'sst2', trust_remote_code=True)
         train_d = d["train"]
         validation_d = d["validation"]
         
@@ -136,8 +136,8 @@ class CopaDataset(Dataset):
         self.load_dataset(subtask, **kwargs)
         
     def load_dataset(self, path, **kwargs):
-        train_examples = load_dataset(trust_remote_code=True, 'super_glue', "copa")["train"]
-        valid_examples = load_dataset(trust_remote_code=True, 'super_glue', "copa")["validation"]
+        train_examples = load_dataset('super_glue', "copa", trust_remote_code=True)["train"]
+        valid_examples = load_dataset('super_glue', "copa", trust_remote_code=True)["validation"]
     
         train_samples = [self.build_sample(example) for example in train_examples]
         valid_samples = [self.build_sample(example) for example in valid_examples]
@@ -164,7 +164,7 @@ class BoolQDataset(Dataset):
         self.load_dataset(subtask, **kwargs)
     
     def load_dataset(self, path, **kwargs):
-        d = load_dataset(trust_remote_code=True, "boolq")
+        d = load_dataset("boolq", trust_remote_code=True)
         train_set = d["train"]
         valid_set = d["validation"]
 
@@ -192,7 +192,7 @@ class MultiRCDataset(Dataset):
         self.load_dataset(subtask, **kwargs)
     
     def load_dataset(self, path, **kwargs):
-        d = load_dataset(trust_remote_code=True, "super_glue", "multirc")
+        d = load_dataset("super_glue", "multirc", trust_remote_code=True)
         train_set = d["train"]
         valid_set = d["validation"]
 
@@ -220,7 +220,7 @@ class CBDataset(Dataset):
         self.load_dataset(subtask, **kwargs)
     
     def load_dataset(self, path, **kwargs):
-        d = load_dataset(trust_remote_code=True, "super_glue", "cb")
+        d = load_dataset("super_glue", "cb", trust_remote_code=True)
         train_set = d["train"]
         valid_set = d["validation"]
 
@@ -248,7 +248,7 @@ class WICDataset(Dataset):
         self.load_dataset(subtask, **kwargs)
     
     def load_dataset(self, path, **kwargs):
-        d = load_dataset(trust_remote_code=True, "super_glue", "wic")
+        d = load_dataset("super_glue", "wic", trust_remote_code=True)
         train_set = d["train"]
         valid_set = d["validation"]
 
@@ -276,7 +276,7 @@ class WSCDataset(Dataset):
         self.load_dataset(subtask, **kwargs)
     
     def load_dataset(self, path, **kwargs):
-        d = load_dataset(trust_remote_code=True, "super_glue", "wsc.fixed")
+        d = load_dataset("super_glue", "wsc.fixed", trust_remote_code=True)
         train_set = d["train"]
         valid_set = d["validation"]
 
@@ -304,7 +304,7 @@ class ReCoRDDataset(Dataset):
         self.load_dataset(subtask, **kwargs)
     
     def load_dataset(self, path, **kwargs):
-        d = load_dataset(trust_remote_code=True, "super_glue", "record")
+        d = load_dataset("super_glue", "record", trust_remote_code=True)
         train_set = d["train"]
         valid_set = d["validation"]
 
@@ -332,7 +332,7 @@ class RTEDataset(Dataset):
         self.load_dataset(subtask, **kwargs)
     
     def load_dataset(self, path, **kwargs):
-        d = load_dataset(trust_remote_code=True, "super_glue", "rte")
+        d = load_dataset("super_glue", "rte", trust_remote_code=True)
         train_set = d["train"]
         valid_set = d["validation"]
 
@@ -362,7 +362,7 @@ class SQuADDataset(Dataset):
         self.load_dataset()
         
     def load_dataset(self):
-        dataset = load_dataset(trust_remote_code=True, "squad")
+        dataset = load_dataset("squad", trust_remote_code=True)
         train_examples = dataset["train"]
         valid_examples = dataset["validation"]
 
@@ -398,7 +398,7 @@ class DROPDataset(Dataset):
         self.load_dataset()
         
     def load_dataset(self):
-        dataset = load_dataset(trust_remote_code=True, "drop")
+        dataset = load_dataset("drop", trust_remote_code=True)
         train_examples = dataset["train"]
         valid_examples = dataset["validation"]
 
