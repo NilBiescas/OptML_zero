@@ -33,8 +33,25 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-AutoConfig.register("mistral", MistralConfig)
-AutoModelForCausalLM.register(MistralConfig, MistralForCausalLM)
+try:
+    AutoConfig.register("mistral", MistralConfig, exist_ok=True)
+except TypeError:
+    try:
+        AutoConfig.register("mistral", MistralConfig)
+    except ValueError:
+        pass
+except ValueError:
+    pass
+
+try:
+    AutoModelForCausalLM.register(MistralConfig, MistralForCausalLM, exist_ok=True)
+except TypeError:
+    try:
+        AutoModelForCausalLM.register(MistralConfig, MistralForCausalLM)
+    except ValueError:
+        pass
+except ValueError:
+    pass
 
 
 @dataclass

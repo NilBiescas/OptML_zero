@@ -23,7 +23,10 @@ from metrics import calculate_metric
 from utils import *
 from trainer import OurTrainer
 from pzo_trainer import PZOTrainer
-from hmezo_trainer import HMeZOTrainer
+try:
+    from hmezo_trainer import HMeZOTrainer
+except ImportError:
+    HMeZOTrainer = None
 import random
 
 @dataclass
@@ -453,6 +456,8 @@ class Framework:
                 #data_collator=DataCollatorWithPaddingAndNesting(self.tokenizer,padding='max_length',max_length=self.args.max_length, pad_to_multiple_of=8)if self.args.train_as_classification else collator(self.tokenizer,padding='max_length',max_length=self.args.max_length, pad_to_multiple_of=8),)
                 data_collator=DataCollatorWithPaddingAndNesting(self.tokenizer, pad_to_multiple_of=8)if self.args.train_as_classification else collator(self.tokenizer, pad_to_multiple_of=8),)
         elif self.args.trainer == 'hzo':
+            if HMeZOTrainer is None:
+                raise ValueError("HMeZOTrainer is requested but 'hmezo_trainer' module could not be imported.")
             trainer = HMeZOTrainer(
                 model=self.model, 
                 args=self.args,
