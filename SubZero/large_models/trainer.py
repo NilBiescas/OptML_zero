@@ -1200,9 +1200,11 @@ class OurTrainer(Trainer):
                 # 'user_content.pt' indicates model state_dict saved with smp >= 1.10
                 Path(os.path.join(output_dir, "user_content.pt")).touch()
         elif (
-                ShardedDDPOption.ZERO_DP_2 in self.args.sharded_ddp
-                or ShardedDDPOption.ZERO_DP_3 in self.args.sharded_ddp
-                or self.fsdp is not None
+                (ShardedDDPOption is not None and (
+                    ShardedDDPOption.ZERO_DP_2 in self.args.sharded_ddp
+                    or ShardedDDPOption.ZERO_DP_3 in self.args.sharded_ddp
+                ))
+                or getattr(self, "fsdp", None) is not None
         ):
             from torch.distributed.fsdp import FullyShardedDataParallel as FSDP, StateDictType, FullStateDictConfig
             full_state_dict_config = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
