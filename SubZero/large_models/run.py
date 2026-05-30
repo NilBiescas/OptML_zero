@@ -163,6 +163,12 @@ class OurArguments(TrainingArguments):
     clean_model_at_end: bool = True  # remove everthing at the end.
 
 def parse_args():
+    import sys
+    # Map --evaluation_strategy to --eval_strategy for compatibility with newer transformers
+    for i, arg in enumerate(sys.argv):
+        if arg.startswith("--evaluation_strategy"):
+            sys.argv[i] = arg.replace("--evaluation_strategy", "--eval_strategy")
+            
     parser = argparse.ArgumentParser()
     parser = HfArgumentParser(OurArguments)
     args = parser.parse_args_into_dataclasses()[0]
