@@ -7,7 +7,7 @@ GASPAR="nil"
 
 GPUS=1
 NODE="${NODE:-a100-40g}"
-PROJECT="dhlab-${GASPAR}"
+PROJECT="vilab-${GASPAR}"
 IMAGE="registry.rcp.epfl.ch/course-cs-552/base-vllm:v1"
 
 # Source environment variables

@@ -649,7 +649,8 @@ class PZOTrainer(Trainer):
             delattr(self, "_past")
 
         logger.info("\n\nTraining completed. Do not forget to share your model on huggingface.co/models =)\n\n")
-        self._load_best_model()
+        if self.args.load_best_model_at_end and self.state.best_model_checkpoint is not None:
+            self._load_best_model()
 
         # add remaining tr_loss
         self._total_loss_scalar += tr_loss.item()
