@@ -20,7 +20,8 @@ fi
 echo ">>> Submitting preemptible training job for PseuZO on SST2 and RTE (${GPUS} GPUs)"
 
 for DATASET in SST2 RTE; do
-  JOB_NAME="${GASPAR}-pseuzo-${DATASET}-$(date +%H%M%S)"
+  DATASET_LOWER=$(echo "$DATASET" | tr '[:upper:]' '[:lower:]')
+  JOB_NAME="${GASPAR}-pseuzo-${DATASET_LOWER}-$(date +%H%M%S)"
 
   runai submit \
     --name "${JOB_NAME}" \
