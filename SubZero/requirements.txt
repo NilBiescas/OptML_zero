@@ -14,7 +14,7 @@ filelock==3.13.1
 fsspec==2023.10.0
 gitdb==4.0.11
 GitPython==3.1.40
-gmpy2==2.1.2
+
 huggingface-hub==0.20.1
 idna==3.6
 Jinja2==3.1.2
@@ -48,7 +48,7 @@ six==1.16.0
 smmap==5.0.1
 sympy==1.12
 threadpoolctl==3.2.0
-tokenizers==0.13.3
+
 torch>=2.1.0
 tqdm==4.66.1
 transformers==4.28.1
