@@ -116,10 +116,10 @@ def forward_wrap_with_option_len_pzo(self, need_grad=False,Hessian_estimate=Fals
       will be calculated.
     """
     with torch.no_grad():
-        outputs = self.original_forward(input_ids=input_ids,**kwargs)
+        outputs = self.original_forward(input_ids=input_ids, output_hidden_states=True, **kwargs)
         if labels is None:
             return outputs
-        last_hidden_state = outputs.hidden_states.detach()
+        last_hidden_state = outputs.hidden_states[-1].detach() if isinstance(outputs.hidden_states, (tuple, list)) else outputs.hidden_states.detach()
         del outputs
         # Calculate the loss
         loss_fct = CrossEntropyLoss(ignore_index=-100)
