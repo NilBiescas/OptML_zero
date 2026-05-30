@@ -949,17 +949,16 @@ class PZOTrainer(Trainer):
         dot_products = []
         random_seeds = []
         # o: (bs,seq,d_hidden)
-        for seed,do in self.sliding_window:
-            _,seq1,_ = do.shape
-            _,seq2,_ = self.grad_last.shape
-            min_seq = min(seq1,seq2)
-            if seq1 > min_seq:
-                do = do[:,-min_seq:,:]
-                dot_product = torch.sum(do[:,-min_seq:,:]*self.grad_last,dim=(-3,-2,-1))
-            elif seq2 > min_seq:
-                dot_product = torch.sum(do*self.grad_last[:,-min_seq:,:],dim=(-3,-2,-1))
-            else:
-                dot_product = torch.sum(do*self.grad_last,dim=(-3,-2,-1))
+        for seed, do in self.sliding_window:
+            b1, seq1, _ = do.shape
+            b2, seq2, _ = self.grad_last.shape
+            min_b = min(b1, b2)
+            min_seq = min(seq1, seq2)
+            
+            do_sliced = do[:min_b, -min_seq:, :]
+            grad_sliced = self.grad_last[:min_b, -min_seq:, :]
+            
+            dot_product = torch.sum(do_sliced * grad_sliced, dim=(-3, -2, -1))
             dot_products.append(dot_product)
             #print(proj / dot_product)
             random_seeds.append(seed)
