@@ -90,7 +90,8 @@ class ZOMuon(Optimizer):
     """
 
     def __init__(self, params, lr=1e-2, eps=1e-3, r=64, Nq=4,
-                 ns_steps=5, refresh_T=50, momentum=0.0, seed=42):
+                 ns_steps=5, refresh_T=50, momentum=0.0,
+                 lr_1d=1e-7, seed=42):
         if lr < 0.0:
             raise ValueError(f"Invalid learning rate: {lr}")
         if r < 1:
@@ -103,8 +104,11 @@ class ZOMuon(Optimizer):
             raise ValueError(f"refresh_T must be >= 1: {refresh_T}")
         if not 0.0 <= momentum < 1.0:
             raise ValueError(f"momentum must be in [0, 1): {momentum}")
+        if lr_1d < 0.0:
+            raise ValueError(f"Invalid lr_1d: {lr_1d}")
         defaults = dict(lr=lr, eps=eps, r=r, Nq=Nq, ns_steps=ns_steps,
-                        refresh_T=refresh_T, momentum=momentum, seed=seed)
+                        refresh_T=refresh_T, momentum=momentum,
+                        lr_1d=lr_1d, seed=seed)
         super().__init__(params, defaults)
         self._step_count = 0
 
@@ -276,7 +280,15 @@ class ZOMuon(Optimizer):
                     del state['G_low']
                 else:
                     # 1D fallback: plain ZO-SGD with the Nq-averaged g_hat.
-                    p.add_(state['acc_1d'], alpha=-lr)
+                    # CRITICAL: 2D weights go through Newton-Schulz which
+                    # orthogonalises updates to element magnitude ~1/sqrt(in_dim),
+                    # so the muon `lr` (e.g. 1e-2) is appropriately small. 1D
+                    # weights have NO such normalization -- raw `acc_1d` has
+                    # element magnitude ~O(c_k) ~ O(1). Applying lr=1e-2 to that
+                    # would thrash biases / layer norms ~5 orders of magnitude
+                    # too aggressively (plain MeZO uses lr=1e-7 for this form).
+                    # We use a separate `lr_1d` (default 1e-7) for 1D updates.
+                    p.add_(state['acc_1d'], alpha=-group['lr_1d'])
                     del state['acc_1d']
 
                 state['step'] += 1

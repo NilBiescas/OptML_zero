@@ -25,7 +25,8 @@ training:
 optimizer:
   name: "ZOMuon"
   kwargs:
-    lr: 1.0e-2
+    lr: 1.0e-2         # for 2D weights (post-Newton-Schulz, unit-norm updates)
+    lr_1d: 1.0e-7      # for 1D weights (biases/LayerNorm) -- plain MeZO scale
     eps: 1.0e-3
     r: 64
     Nq: 4
