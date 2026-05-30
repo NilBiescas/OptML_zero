@@ -816,7 +816,7 @@ class PZOTrainer(Trainer):
 
         self.lr_scheduler.step()
 
-    def log(self, logs: Dict[str, float]) -> None:
+    def log(self, logs: Dict[str, float], *args, **kwargs) -> None:
         import os
         import torch
         
@@ -842,7 +842,7 @@ class PZOTrainer(Trainer):
             elif k == "eval_loss":
                 logs["val_loss"] = v
                 
-        super().log(logs)
+        super().log(logs, *args, **kwargs)
 
     ############## My Sliding Window ZO ##############
     

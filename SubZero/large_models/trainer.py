@@ -166,7 +166,7 @@ class OurTrainer(Trainer):
         self.p_state = dict()
         self.update_steps = 0
         
-    def log(self, logs: Dict[str, float]) -> None:
+    def log(self, logs: Dict[str, float], *args, **kwargs) -> None:
         import os
         import torch
         
@@ -188,7 +188,7 @@ class OurTrainer(Trainer):
             elif k == "eval_loss":
                 logs["val_loss"] = v
                 
-        super().log(logs)
+        super().log(logs, *args, **kwargs)
         
     def _inner_training_loop(
             self, batch_size=None, args=None, resume_from_checkpoint=None, trial=None, ignore_keys_for_eval=None
