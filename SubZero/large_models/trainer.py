@@ -44,13 +44,24 @@ try:
     from transformers.integrations.deepspeed import deepspeed_init, is_deepspeed_zero3_enabled
 except ImportError:
     from transformers.deepspeed import deepspeed_init, is_deepspeed_zero3_enabled
-from transformers.dependency_versions_check import dep_version_check
+try:
+    from transformers.dependency_versions_check import dep_version_check
+except ImportError:
+    def dep_version_check(*args, **kwargs): pass
 # Integrations must be imported before ML frameworks:
 from transformers.integrations import (  # isort: split
     hp_params,
-    is_fairscale_available,
 )
-from transformers.pytorch_utils import is_torch_greater_or_equal_than_1_10, is_torch_less_than_1_11
+try:
+    from transformers.integrations import is_fairscale_available
+except ImportError:
+    def is_fairscale_available():
+        return False
+try:
+    from transformers.pytorch_utils import is_torch_greater_or_equal_than_1_10, is_torch_less_than_1_11
+except ImportError:
+    is_torch_greater_or_equal_than_1_10 = True
+    is_torch_less_than_1_11 = False
 from transformers.trainer_callback import (
     DefaultFlowCallback,
     ProgressCallback,
@@ -59,21 +70,40 @@ from transformers.trainer_callback import (
 from transformers.trainer_pt_utils import (
     IterableDatasetShard,
 )
+try:
+    from transformers.trainer_utils import ShardedDDPOption
+except ImportError:
+    ShardedDDPOption = None
 from transformers.trainer_utils import (
     HPSearchBackend,
-    ShardedDDPOption,
     TrainOutput,
     has_length,
     speed_metrics,
 )
 from transformers.utils import (
     WEIGHTS_NAME,
-    is_apex_available,
-    is_in_notebook,
-    is_sagemaker_mp_enabled,
-    is_torch_tpu_available,
     logging,
 )
+try:
+    from transformers.utils import is_apex_available
+except ImportError:
+    def is_apex_available():
+        return False
+try:
+    from transformers.utils import is_in_notebook
+except ImportError:
+    def is_in_notebook():
+        return False
+try:
+    from transformers.utils import is_sagemaker_mp_enabled
+except ImportError:
+    def is_sagemaker_mp_enabled():
+        return False
+try:
+    from transformers.utils import is_torch_tpu_available
+except ImportError:
+    def is_torch_tpu_available(check_device=True):
+        return False
 
 # from torch_optimizers.sgd_clip import SGDClip
 

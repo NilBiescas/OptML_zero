@@ -1,6 +1,6 @@
 wandb
 scikit-learn
-datasets
+datasets<3.0.0
 accelerate
 transformers
 numba>=0.59.0

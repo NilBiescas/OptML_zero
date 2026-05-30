@@ -44,20 +44,32 @@ from transformers import Trainer
 from sklearn.linear_model import LinearRegression, LogisticRegression, LogisticRegressionCV
 
 # Integrations must be imported before ML frameworks:
-from transformers.integrations import (  # isort: split
-    #default_hp_search_backend,
-    get_reporting_integration_callbacks,
-    hp_params,
-    #is_fairscale_available,
-    is_optuna_available,
-    is_ray_tune_available,
-    is_sigopt_available,
-    is_wandb_available,
-    run_hp_search_optuna,
-    run_hp_search_ray,
-    run_hp_search_sigopt,
-    run_hp_search_wandb,
-)
+try:
+    from transformers.integrations import (  # isort: split
+        get_reporting_integration_callbacks,
+        hp_params,
+        is_optuna_available,
+        is_ray_tune_available,
+        is_sigopt_available,
+        is_wandb_available,
+        run_hp_search_optuna,
+        run_hp_search_ray,
+        run_hp_search_sigopt,
+        run_hp_search_wandb,
+    )
+except ImportError:
+    from transformers.integrations import (
+        hp_params,
+    )
+    def get_reporting_integration_callbacks(*args, **kwargs): return []
+    def is_optuna_available(): return False
+    def is_ray_tune_available(): return False
+    def is_sigopt_available(): return False
+    def is_wandb_available(): return False
+    def run_hp_search_optuna(*args, **kwargs): raise NotImplementedError
+    def run_hp_search_ray(*args, **kwargs): raise NotImplementedError
+    def run_hp_search_sigopt(*args, **kwargs): raise NotImplementedError
+    def run_hp_search_wandb(*args, **kwargs): raise NotImplementedError
 
 import numpy as np
 import torch
@@ -67,7 +79,10 @@ from torch import nn
 from torch.utils.data import DataLoader, Dataset, RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
 
-from huggingface_hub import Repository
+try:
+    from huggingface_hub import Repository
+except ImportError:
+    Repository = None
 
 from transformers import __version__
 from transformers.configuration_utils import PretrainedConfig
@@ -75,10 +90,17 @@ from transformers.data.data_collator import DataCollator, DataCollatorWithPaddin
 from transformers.debug_utils import DebugOption, DebugUnderflowOverflow
 #from transformers.deepspeed import deepspeed_init, is_deepspeed_zero3_enabled
 from transformers.dependency_versions_check import dep_version_check
-from transformers.modelcard import TrainingSummary
+try:
+    from transformers.modelcard import TrainingSummary
+except ImportError:
+    TrainingSummary = None
 from transformers.modeling_utils import PreTrainedModel, load_sharded_checkpoint, unwrap_model
 from transformers.models.auto.modeling_auto import MODEL_FOR_CAUSAL_LM_MAPPING_NAMES, MODEL_MAPPING_NAMES
-from transformers.optimization import Adafactor, get_scheduler
+try:
+    from transformers.optimization import Adafactor, get_scheduler
+except ImportError:
+    from transformers.optimization import get_scheduler
+    Adafactor = None
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 from transformers.trainer_callback import (
     CallbackHandler,
@@ -89,71 +111,129 @@ from transformers.trainer_callback import (
     TrainerControl,
     TrainerState,
 )
-from transformers.trainer_pt_utils import (
-    DistributedLengthGroupedSampler,
-    DistributedSamplerWithLoop,
-    DistributedTensorGatherer,
-    IterableDatasetShard,
-    LabelSmoother,
-    LengthGroupedSampler,
-    SequentialDistributedSampler,
-    ShardSampler,
-    distributed_broadcast_scalars,
-    distributed_concat,
-    find_batch_size,
-    get_module_class_from_name,
-    get_parameter_names,
-    nested_concat,
-    nested_detach,
-    nested_numpify,
-    nested_truncate,
-    nested_xla_mesh_reduce,
-    reissue_pt_warnings,
-)
-from transformers.trainer_utils import (
-    PREFIX_CHECKPOINT_DIR,
-    BestRun,
-    EvalLoopOutput,
-    EvalPrediction,
-    FSDPOption,
-    HPSearchBackend,
-    HubStrategy,
-    IntervalStrategy,
-    PredictionOutput,
-    RemoveColumnsCollator,
-    #ShardedDDPOption,
-    TrainerMemoryTracker,
-    TrainOutput,
-    default_compute_objective,
-    denumpify_detensorize,
-    enable_full_determinism,
-    find_executable_batch_size,
-    get_last_checkpoint,
-    has_length,
-    number_of_arguments,
-    seed_worker,
-    set_seed,
-    speed_metrics,
-)
-from transformers.training_args import OptimizerNames, ParallelMode, TrainingArguments
-from transformers.utils import (
-    CONFIG_NAME,
-    WEIGHTS_INDEX_NAME,
-    WEIGHTS_NAME,
-    find_labels,
-    get_full_repo_name,
-    is_apex_available,
-    is_datasets_available,
-    is_in_notebook,
-    is_ipex_available,
-    is_sagemaker_dp_enabled,
-    is_sagemaker_mp_enabled,
-    is_torch_tensorrt_fx_available,
-    is_torch_tpu_available,
-    is_torchdynamo_available,
-    logging,
-)
-from transformers.utils.generic import ContextManagers
+try:
+    from transformers.trainer_pt_utils import (
+        DistributedLengthGroupedSampler,
+        DistributedSamplerWithLoop,
+        DistributedTensorGatherer,
+        IterableDatasetShard,
+        LabelSmoother,
+        LengthGroupedSampler,
+        SequentialDistributedSampler,
+        ShardSampler,
+        distributed_broadcast_scalars,
+        distributed_concat,
+        find_batch_size,
+        get_module_class_from_name,
+        get_parameter_names,
+        nested_concat,
+        nested_detach,
+        nested_numpify,
+        nested_truncate,
+        nested_xla_mesh_reduce,
+        reissue_pt_warnings,
+    )
+except ImportError:
+    from transformers.trainer_pt_utils import (
+        IterableDatasetShard,
+        LabelSmoother,
+        find_batch_size,
+        get_parameter_names,
+        nested_concat,
+        nested_detach,
+        nested_numpify,
+        nested_truncate,
+    )
+    def reissue_pt_warnings(*args, **kwargs): pass
+    def distributed_broadcast_scalars(*args, **kwargs): pass
+    def distributed_concat(*args, **kwargs): pass
+    def nested_xla_mesh_reduce(*args, **kwargs): pass
+try:
+    from transformers.trainer_utils import (
+        PREFIX_CHECKPOINT_DIR,
+        BestRun,
+        EvalLoopOutput,
+        EvalPrediction,
+        FSDPOption,
+        HPSearchBackend,
+        HubStrategy,
+        IntervalStrategy,
+        PredictionOutput,
+        RemoveColumnsCollator,
+        TrainerMemoryTracker,
+        TrainOutput,
+        default_compute_objective,
+        denumpify_detensorize,
+        enable_full_determinism,
+        find_executable_batch_size,
+        get_last_checkpoint,
+        has_length,
+        number_of_arguments,
+        seed_worker,
+        set_seed,
+        speed_metrics,
+    )
+except ImportError:
+    from transformers.trainer_utils import (
+        PREFIX_CHECKPOINT_DIR,
+        EvalPrediction,
+        HPSearchBackend,
+        TrainOutput,
+        has_length,
+        speed_metrics,
+        get_last_checkpoint,
+        set_seed,
+    )
+    TrainerMemoryTracker = None
+    FSDPOption = None
+try:
+    from transformers.training_args import OptimizerNames, ParallelMode, TrainingArguments
+except ImportError:
+    from transformers import TrainingArguments
+try:
+    from transformers.utils import (
+        CONFIG_NAME,
+        WEIGHTS_INDEX_NAME,
+        WEIGHTS_NAME,
+        find_labels,
+        get_full_repo_name,
+        is_apex_available,
+        is_datasets_available,
+        is_in_notebook,
+        is_ipex_available,
+        is_sagemaker_dp_enabled,
+        is_sagemaker_mp_enabled,
+        is_torch_tensorrt_fx_available,
+        is_torch_tpu_available,
+        is_torchdynamo_available,
+        logging,
+    )
+except ImportError:
+    from transformers.utils import (
+        WEIGHTS_NAME,
+        logging,
+    )
+    CONFIG_NAME = "config.json"
+    WEIGHTS_INDEX_NAME = "pytorch_model.bin.index.json"
+    def find_labels(*args, **kwargs): return []
+    def get_full_repo_name(*args, **kwargs): return ""
+    def is_apex_available(): return False
+    def is_datasets_available(): return True
+    def is_in_notebook(): return False
+    def is_ipex_available(): return False
+    def is_sagemaker_dp_enabled(): return False
+    def is_sagemaker_mp_enabled(): return False
+    def is_torch_tensorrt_fx_available(): return False
+    def is_torch_tpu_available(check_device=True): return False
+    def is_torchdynamo_available(): return False
+try:
+    from transformers.utils.generic import ContextManagers
+except ImportError:
+    from contextlib import contextmanager
+    class ContextManagers:
+        def __init__(self, managers): self.managers = managers
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
 
 DEFAULT_CALLBACKS = [DefaultFlowCallback]
 DEFAULT_PROGRESS_CALLBACK = ProgressCallback
