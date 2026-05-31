@@ -587,6 +587,21 @@ def main():
         os.environ["WANDB_MODE"] = "disabled"
     args = parse_args()
 
+    # Set up a beautiful and descriptive WandB run name
+    if "WANDB_NAME" not in os.environ:
+        run_name = os.environ.get("RUN_NAME")
+        if not run_name:
+            model_short = args.model_name.split('/')[-1]
+            run_name = f"{args.task_name}-{model_short}-{args.trainer}"
+            if args.tag:
+                run_name += f"-{args.tag}"
+        os.environ["WANDB_NAME"] = run_name
+
+    # Set a default WandB project name if not specified
+    if "WANDB_PROJECT" not in os.environ:
+        os.environ["WANDB_PROJECT"] = "PseuZO"
+
+
     set_seed(args.seed)
     task = get_task(args.task_name)
     train_sets = task.sample_train_sets(num_train=args.num_train, num_dev=args.num_dev, num_eval=args.num_eval, num_train_sets=args.num_train_sets, seed=args.train_set_seed)
