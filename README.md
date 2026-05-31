@@ -56,7 +56,23 @@ register it in `TASKS`. No other code changes. Then `--task <new_name>`.
 ```
 train.py        # main script
 tasks.py        # SuperGLUE task templates + LL-eval helpers
-optimizers/     # MeZO, SparseMeZO, LOZO/LOZOM, DiZO, HiZOO
+optimizers/     # EMPTY — implement each method from the original paper here
 configs/        # one YAML per optimizer
 requirements.txt
 ```
+
+## Implementing an optimizer
+
+The `optimizers/` folder is intentionally empty — each team member implements
+their assigned method from scratch following the paper's reference code.
+
+Convention:
+- File: `optimizers/<lowercase_name>.py` (e.g. `optimizers/mezo.py`)
+- Class: `<CamelCaseName>(torch.optim.Optimizer)` (e.g. `MeZO`)
+- Must implement `.step(closure)` where `closure()` returns the loss tensor
+  (ZO methods call the closure twice — once for `loss(x + ε·z)` and once for
+  `loss(x − ε·z)` — to estimate the directional derivative).
+
+The class name in the YAML's `optimizer.name` field must match the class name
+in the module. `train.py:OPTIMIZER_MODULES` maps class name → module file —
+add an entry there when you add a new method.

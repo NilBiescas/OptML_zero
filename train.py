@@ -21,6 +21,7 @@ Usage:
   RUN_OWNER=nil python train.py --config configs/hizoo.yaml --task multirc
 """
 import argparse
+import importlib
 import math
 import os
 import time
@@ -32,21 +33,32 @@ import yaml
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer, set_seed
 
-from optimizers.dizo import DiZO
-from optimizers.hizoo import HiZOO
-from optimizers.lozo import LOZO, LOZOM
-from optimizers.mezo import MeZO
-from optimizers.sparse_mezo import SparseMeZO
 from tasks import load_task
 
-OPTIMIZERS = {
-    "MeZO":       MeZO,
-    "SparseMeZO": SparseMeZO,
-    "LOZO":       LOZO,
-    "LOZOM":      LOZOM,
-    "DiZO":       DiZO,
-    "HiZOO":      HiZOO,
+# Map optimizer class name -> module filename under optimizers/.
+# Add new methods here (or just edit the file at the path) — train.py will
+# lazily import only the one selected by the YAML, so missing modules for
+# methods you're not running don't break anything.
+OPTIMIZER_MODULES = {
+    "MeZO":       "mezo",
+    "SparseMeZO": "sparse_mezo",
+    "LOZO":       "lozo",
+    "LOZOM":      "lozo",
+    "DiZO":       "dizo",
+    "HiZOO":      "hizoo",
 }
+
+
+def load_optimizer_cls(name: str):
+    if name not in OPTIMIZER_MODULES:
+        raise ValueError(f"Unknown optimizer {name!r}; registered: {list(OPTIMIZER_MODULES)}")
+    mod = importlib.import_module(f"optimizers.{OPTIMIZER_MODULES[name]}")
+    if not hasattr(mod, name):
+        raise ImportError(
+            f"optimizers/{OPTIMIZER_MODULES[name]}.py is missing class `{name}`. "
+            "Implement it first (see optimizers/__init__.py for the convention)."
+        )
+    return getattr(mod, name)
 
 
 # --------------------------------------------------------------------------
@@ -146,10 +158,9 @@ def main():
     if owner not in {"maria", "nil", "cheng"}:
         raise ValueError(f"--owner / RUN_OWNER / config 'owner' must be one of maria|nil|cheng (got {owner!r})")
 
-    opt_name = cfg["optimizer"]["name"]
-    if opt_name not in OPTIMIZERS:
-        raise ValueError(f"Unknown optimizer {opt_name!r}; registered: {list(OPTIMIZERS)}")
+    opt_name   = cfg["optimizer"]["name"]
     opt_kwargs = cfg["optimizer"].get("kwargs", {}) or {}
+    opt_cls    = load_optimizer_cls(opt_name)
 
     seed       = cfg.get("training", {}).get("seed", 42)
     batch_size = cfg.get("training", {}).get("batch_size", 16)
@@ -204,7 +215,7 @@ def main():
     )
 
     # ---- Optimizer ----
-    optimizer = OPTIMIZERS[opt_name](model.parameters(), **opt_kwargs)
+    optimizer = opt_cls(model.parameters(), **opt_kwargs)
     print(f"[Opt] {opt_name}({opt_kwargs})")
 
     # ---- Training loop ----
