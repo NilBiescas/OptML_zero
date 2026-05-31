@@ -1,0 +1,22 @@
+# LOZO (Chen et al. ICLR 2025). Low-rank perturbation U V^T, V resampled every nu steps.
+owner: maria
+
+model:
+  name: Qwen/Qwen2.5-0.5B
+
+training:
+  seed: 42
+  batch_size: 16
+  max_steps: 20000
+  eval_steps: 500
+  num_train: 1000
+  num_eval: 1000
+
+optimizer:
+  name: LOZO
+  kwargs:
+    lr: 1.0e-5
+    eps: 1.0e-3
+    r: 4
+    nu: 50
+    seed: 42

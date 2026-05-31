@@ -1,0 +1,21 @@
+# DiZO (Tan et al. NeurIPS 2025). Divergence-driven layer adaptation.
+owner: maria
+
+model:
+  name: Qwen/Qwen2.5-0.5B
+
+training:
+  seed: 42
+  batch_size: 16
+  max_steps: 20000
+  eval_steps: 500
+  num_train: 1000
+  num_eval: 1000
+
+optimizer:
+  name: DiZO
+  kwargs:
+    lr: 1.0e-7
+    eps: 1.0e-3
+    eps_proj: 1.0e-1
+    seed: 42

@@ -1,0 +1,24 @@
+# Sparse-MeZO (Liu et al. 2024). Paper "sparsity 0.80" = our `sparsity 0.20`
+# (we define sparsity as fraction PERTURBED; vanilla MeZO is 1.0).
+owner: maria
+
+model:
+  name: Qwen/Qwen2.5-0.5B
+
+training:
+  seed: 42
+  batch_size: 16
+  max_steps: 20000
+  eval_steps: 500
+  num_train: 1000
+  num_eval: 1000
+
+optimizer:
+  name: SparseMeZO
+  kwargs:
+    lr: 1.0e-6
+    eps: 1.0e-3
+    sparsity: 0.20
+    mask_mode: small_magnitude   # small_magnitude | large_magnitude | random
+    mask_refresh: 1              # paper uses dynamic mask (recompute every step)
+    seed: 42
