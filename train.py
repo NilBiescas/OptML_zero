@@ -31,8 +31,10 @@ Usage:
 """
 import argparse
 import importlib
+import json
 import math
 import os
+import shutil
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,6 +47,15 @@ from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM, AutoTokenizer, set_seed
 
 from tasks import load_task
+
+DTYPE_ALIASES = {
+    "float16":  torch.float16,
+    "fp16":     torch.float16,
+    "bfloat16": torch.bfloat16,
+    "bf16":     torch.bfloat16,
+    "float32":  torch.float32,
+    "fp32":     torch.float32,
+}
 
 # Map optimizer class name -> module filename under optimizers/.
 # train.py lazily imports only the one selected by the YAML, so missing
@@ -90,6 +101,9 @@ def parse_args():
                    help="Batch size for the eval forward (eval is bottleneck if =1)")
     p.add_argument("--ckpt-dir", default="checkpoints",
                    help="Root dir for best/last checkpoints (one subdir per run)")
+    p.add_argument("--resume-from", default=None,
+                   help="Path to a prior run's `last/` dir to resume from "
+                        "(reuses model weights + optimizer state + step/forward/best counters)")
     return p.parse_args()
 
 
@@ -186,18 +200,66 @@ def evaluate(model, tokenizer, val_examples, spec, device, eval_batch_size=8):
 # --------------------------------------------------------------------------
 # Checkpointing
 # --------------------------------------------------------------------------
-def save_checkpoint(model, tokenizer, dest_dir: Path, meta: dict):
-    """Save model + tokenizer + a small training_meta.json under dest_dir."""
-    import json
+def save_checkpoint(model, tokenizer, optimizer, dest_dir: Path,
+                    meta: dict, source_cfg_path: str | None = None):
+    """Persist model + tokenizer + optimizer state + meta + resolved YAML.
+
+    The YAML copy (+ git SHA in meta) makes any saved checkpoint
+    self-describing — combined with the optimizer state pickle, a run can be
+    resumed from disk with `--resume-from <this_dir>`.
+    """
     dest_dir.mkdir(parents=True, exist_ok=True)
     try:
         model.save_pretrained(dest_dir)
         tokenizer.save_pretrained(dest_dir)
     except Exception as e:
-        # 8-bit/quantized models can have surprises here; don't kill the run.
+        # 8-bit / quantized models can have surprises here; don't kill the run.
         print(f"[ckpt] save_pretrained failed at {dest_dir}: {e}")
+    try:
+        torch.save(optimizer.state_dict(), dest_dir / "optimizer.pt")
+    except Exception as e:
+        # Some custom optimizer states (closures, non-tensor objects) don't
+        # pickle cleanly — record the failure but keep the rest of the ckpt.
+        print(f"[ckpt] optimizer.state_dict() save failed at {dest_dir}: {e}")
+    if source_cfg_path:
+        try:
+            shutil.copy(source_cfg_path, dest_dir / "config.yaml")
+        except Exception as e:
+            print(f"[ckpt] config.yaml copy failed at {dest_dir}: {e}")
     with open(dest_dir / "training_meta.json", "w") as fp:
         json.dump(meta, fp, indent=2, default=str)
+
+
+def _git_sha() -> str | None:
+    """Best-effort git SHA of the repo train.py lives in (None if not a repo)."""
+    try:
+        import subprocess
+        out = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parent,
+            stderr=subprocess.DEVNULL,
+        )
+        return out.decode().strip()
+    except Exception:
+        return None
+
+
+def _hub_push_folder(folder: Path, repo_id: str, sub_path: str, commit_message: str):
+    """Best-effort push to HF Hub. Soft-fails on any error."""
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi()
+        api.create_repo(repo_id=repo_id, exist_ok=True)
+        api.upload_folder(
+            folder_path=str(folder),
+            repo_id=repo_id,
+            path_in_repo=sub_path,
+            commit_message=commit_message,
+        )
+        return True
+    except Exception as e:
+        print(f"[hub] push to {repo_id}/{sub_path} failed: {e}")
+        return False
 
 
 # --------------------------------------------------------------------------
@@ -225,6 +287,34 @@ def main():
     num_train  = cfg.get("training", {}).get("num_train", 1000)
     num_eval   = cfg.get("training", {}).get("num_eval", 1000)
     model_name = cfg.get("model", {}).get("name", "Qwen/Qwen3.5-0.8B")
+    dtype_str  = cfg.get("model", {}).get("dtype", "float16")
+    if dtype_str not in DTYPE_ALIASES:
+        raise ValueError(f"model.dtype must be one of {list(DTYPE_ALIASES)} (got {dtype_str!r})")
+    model_dtype = DTYPE_ALIASES[dtype_str]
+
+    # ---- HF Hub push (optional) ------------------------------------------
+    hub_cfg     = cfg.get("hub", {}) or {}
+    push_to_hub = bool(hub_cfg.get("push_to_hub", False))
+    hub_repo_id = hub_cfg.get("repo_id")
+    if push_to_hub and not hub_repo_id:
+        raise ValueError("hub.push_to_hub: true requires hub.repo_id in the YAML")
+
+    # ---- Resume meta (loaded early so global_step / best / total_forwards
+    # ----   are seeded from disk before training starts) ------------------
+    resume_meta = None
+    if args.resume_from:
+        resume_path = Path(args.resume_from)
+        meta_path   = resume_path / "training_meta.json"
+        if meta_path.exists():
+            with open(meta_path) as f:
+                resume_meta = json.load(f)
+            print(f"[Resume] meta from {meta_path}: "
+                  f"step={resume_meta.get('total_steps')} "
+                  f"forwards={resume_meta.get('total_forwards')} "
+                  f"best={resume_meta.get('best')}")
+        else:
+            print(f"[Resume] WARNING: no training_meta.json at {meta_path}; "
+                  "weights will load but counters start from 0.")
 
     set_seed(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -237,7 +327,12 @@ def main():
         name=run_name,
         group=args.task,                             # group all multirc / all copa together
         tags=[owner, opt_name, args.task],           # filter in the dashboard
-        config={**cfg, "task": args.task, "owner": owner, "_resolved_seed": seed},
+        config={**cfg, "task": args.task, "owner": owner,
+                "_resolved_seed": seed,
+                "_resolved_dtype": dtype_str,
+                "_resumed_from":   args.resume_from,
+                "_hub_push":       push_to_hub,
+                "_hub_repo_id":    hub_repo_id},
     )
 
     # ---- Load task data ---------------------------------------------------
@@ -249,21 +344,23 @@ def main():
     print(f"[Data] task={args.task}  train={len(ds['train'])}  eval={len(val_examples)}")
 
     # ---- Load tokenizer + model ------------------------------------------
-    print(f"[Model] loading {model_name}")
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    # On resume, load weights from `args.resume_from`; otherwise from HF Hub.
+    weights_src = args.resume_from if args.resume_from else model_name
+    print(f"[Model] loading {weights_src}  dtype={dtype_str}")
+    tokenizer = AutoTokenizer.from_pretrained(weights_src, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     if cfg.get("model", {}).get("load_in_8bit", False):
         from transformers import BitsAndBytesConfig
         print("[Model] using load_in_8bit (bitsandbytes)")
         model = AutoModelForCausalLM.from_pretrained(
-            model_name, trust_remote_code=True,
+            weights_src, trust_remote_code=True,
             quantization_config=BitsAndBytesConfig(load_in_8bit=True),
             device_map={"": 0},
         )
     else:
         model = AutoModelForCausalLM.from_pretrained(
-            model_name, trust_remote_code=True, torch_dtype=torch.float16,
+            weights_src, trust_remote_code=True, torch_dtype=model_dtype,
         ).to(device)
     model.config.pad_token_id = tokenizer.pad_token_id
     model.eval()  # ZO assumes no dropout noise in the gradient estimate
@@ -283,6 +380,19 @@ def main():
     # ---- Optimizer --------------------------------------------------------
     optimizer = opt_cls(model.parameters(), **opt_kwargs)
     print(f"[Opt] {opt_name}({opt_kwargs})")
+
+    # ---- Resume optimizer state (best-effort) ----------------------------
+    if args.resume_from:
+        opt_state_path = Path(args.resume_from) / "optimizer.pt"
+        if opt_state_path.exists():
+            try:
+                optimizer.load_state_dict(torch.load(opt_state_path, weights_only=False))
+                print(f"[Resume] loaded optimizer state from {opt_state_path}")
+            except Exception as e:
+                print(f"[Resume] could not load optimizer state ({e}); continuing fresh")
+        else:
+            print(f"[Resume] no optimizer.pt at {opt_state_path}; "
+                  "ZO RNG seeds will re-derive from global_step")
 
     # ---- Budget bookkeeping ----------------------------------------------
     steps_per_epoch = max(1, math.ceil(len(train_packs) / batch_size))
@@ -304,22 +414,22 @@ def main():
     if torch.cuda.is_available():
         torch.cuda.reset_peak_memory_stats()
     step_times          = []
-    global_step         = 0
-    total_forwards      = 0  # cumulative closure calls across all completed steps
     train_iter          = iter(train_loader)
     nan_seen            = False
     run_start_time      = time.perf_counter()
 
-    # Best-eval tracker: which step / forwards / wall-time gave the highest
-    # logit_accuracy seen so far.
+    # Resume counters from disk if we have them.
+    global_step         = int(resume_meta["total_steps"])    if resume_meta else 0
+    total_forwards      = int(resume_meta["total_forwards"]) if resume_meta else 0
     best = {
-        "logit_accuracy": -1.0,
-        "token_accuracy": 0.0,
-        "at_step":        0,
-        "at_forwards":    0,
-        "at_time_sec":    0.0,
+        "logit_accuracy": -1.0, "token_accuracy": 0.0,
+        "at_step":  0, "at_forwards": 0, "at_time_sec": 0.0,
     }
-
+    if resume_meta and isinstance(resume_meta.get("best"), dict):
+        best.update(resume_meta["best"])
+    if global_step >= max_steps:
+        print(f"[Resume] global_step {global_step} already >= max_steps {max_steps}; "
+              "nothing to do.")
     last_eval = None  # final eval metrics (for the [Done] summary)
 
     while global_step < max_steps:
@@ -440,9 +550,18 @@ def main():
                 best["at_step"]        = global_step
                 best["at_forwards"]    = total_forwards
                 best["at_time_sec"]    = time.perf_counter() - run_start_time
-                meta = {**best, "run_name": run_name, "task": args.task,
-                        "opt_name": opt_name, "owner": owner}
-                save_checkpoint(model, tokenizer, best_dir, meta)
+                best_meta = {
+                    "best":           dict(best),
+                    "total_steps":    global_step,
+                    "total_forwards": total_forwards,
+                    "run_name":       run_name,
+                    "task":           args.task,
+                    "opt_name":       opt_name,
+                    "owner":          owner,
+                    "git_sha":        _git_sha(),
+                }
+                save_checkpoint(model, tokenizer, optimizer, best_dir,
+                                best_meta, source_cfg_path=args.config)
                 wandb.log({
                     "best_eval/logit_accuracy": best["logit_accuracy"],
                     "best_eval/token_accuracy": best["token_accuracy"],
@@ -453,6 +572,18 @@ def main():
                 print(f"  [best] new best logit_acc={best['logit_accuracy']:.4f} "
                       f"(saved -> {best_dir})")
 
+                # Optional HF Hub push of the best checkpoint.
+                if push_to_hub:
+                    ok = _hub_push_folder(
+                        folder=best_dir,
+                        repo_id=hub_repo_id,
+                        sub_path=f"{run_name}/best",
+                        commit_message=(f"best ckpt {run_name} step={global_step} "
+                                        f"logit_acc={best['logit_accuracy']:.4f}"),
+                    )
+                    if ok:
+                        print(f"  [hub] pushed best ckpt to {hub_repo_id}/{run_name}/best")
+
             model.eval()   # keep eval mode for the next ZO step
 
     # ---- Save LAST checkpoint -----------------------------------------------
@@ -461,12 +592,24 @@ def main():
         "total_forwards": total_forwards,
         "wall_time_sec":  time.perf_counter() - run_start_time,
         "nan_aborted":    nan_seen,
+        "best":           dict(best),
         "run_name":       run_name,
         "task":           args.task,
         "opt_name":       opt_name,
         "owner":          owner,
+        "git_sha":        _git_sha(),
     }
-    save_checkpoint(model, tokenizer, last_dir, final_meta)
+    save_checkpoint(model, tokenizer, optimizer, last_dir,
+                    final_meta, source_cfg_path=args.config)
+
+    # Optional HF Hub push of the last checkpoint too (one final upload).
+    if push_to_hub:
+        _hub_push_folder(
+            folder=last_dir,
+            repo_id=hub_repo_id,
+            sub_path=f"{run_name}/last",
+            commit_message=f"last ckpt {run_name} step={global_step}",
+        )
 
     # ---- Final summary ------------------------------------------------------
     total_time = time.perf_counter() - run_start_time

@@ -9,7 +9,7 @@ apples-to-apples cross-method numbers in one WandB project.
 
 | Item        | Value |
 |---|---|
-| Model       | `Qwen/Qwen3.5-0.8B` (fp16 — ZO does no backprop) |
+| Model       | `Qwen/Qwen3.5-0.8B` (fp16 default; `model.dtype: bfloat16` or `float32` in YAML) |
 | Tasks       | SuperGLUE **MultiRC** and **COPA** (more in `tasks.py:TASKS`) |
 | Train ex.   | 1000 (MeZO paper convention) |
 | Steps       | 20 000 |
@@ -64,6 +64,37 @@ python train.py --config configs/subzero.yaml     --task multirc
 | FZOO        | cheng | `FZOO`       | `optimizers/fzoo.py`         |
 | PseuZO      | nil   | `PseuZO`     | `optimizers/pseuzo.py`       |
 | SubZero     | nil   | `SubZero`    | `optimizers/subzero.py`      |
+
+## Optional YAML fields
+
+```yaml
+model:
+  name:           Qwen/Qwen3.5-0.8B
+  dtype:          float16       # float16 | bfloat16 | float32 (default float16)
+  load_in_8bit:   false         # QuZO uses this — bitsandbytes 8-bit base
+
+hub:
+  push_to_hub:    false         # if true, best + last ckpts pushed to HF Hub
+  repo_id:        ""            # e.g. "nilbiescas3/zo-comparison"
+```
+
+`bfloat16` is worth flipping on for any method that hit fp16 underflow during
+replication (Sparse-MeZO did — see RCP1's notes on issue #2).
+
+## Resuming a crashed run
+
+Every run writes to `checkpoints/<run_name>/last/`. To pick up where it died:
+
+```bash
+python train.py --config configs/mezo.yaml --task multirc \
+    --resume-from checkpoints/maria-MeZO-multirc-06_01_12_30_45/last
+```
+
+The harness restores: model weights, tokenizer, optimizer state (best-effort —
+custom optimizer state is pickled via `state_dict()`), `global_step`,
+`total_forwards`, and the `best/*` tracker. The new run gets a fresh
+WandB name (timestamped at resume); the wandb config records
+`_resumed_from: <path>` so you can chain the two views in the dashboard.
 
 ## Adding a new SuperGLUE task
 
