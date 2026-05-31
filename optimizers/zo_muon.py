@@ -269,23 +269,17 @@ class ZOMuon(Optimizer):
                     G_full = G_full.view_as(p.data)
                     ns_steps = group.get('ns_steps', 5)
                     O = _newton_schulz_5(G_full, steps=ns_steps)
-                    # Muon RMS-match rescale: keep the per-element step
-                    # magnitude calibrated to Adam-equivalent across shapes.
-                    # Without this the orthogonalised update has element RMS
-                    # ~1/sqrt(min(out,in)) and the effective per-coordinate
-                    # step is ~30x too small at OPT-1.3B's typical 2048x2048
-                    # / 8192x2048 matrices, leaving ~2pp on the table.
-                    # Reference: Keller Jordan's Muon (kellerjordan.github.io)
-                    # and OPTML-Group/ZO-Muon's llm/optimizers.py.
-                    out_dim = p.size(0)
-                    in_dim  = p.numel() // p.size(0)
-                    rms_scale = max(1.0, math.sqrt(out_dim / in_dim)) * 0.2
+                    # Match the official OPTML-Group/ZO-Muon repo: NO Muon
+                    # *0.2 RMS rescale (an earlier attempt added it on a
+                    # reviewer's recommendation; in practice it shrank every
+                    # update 5x for square matrices and stalled training at
+                    # ~56% on SST-2). The paper's lr=1e-2 is already
+                    # calibrated for the un-rescaled orthogonalised update.
                     if beta > 0.0:
-                        state['momentum_buf'].mul_(beta).add_(O.float(),
-                                                              alpha=rms_scale)
+                        state['momentum_buf'].mul_(beta).add_(O.float())
                         p.add_(state['momentum_buf'].to(p.dtype), alpha=-lr)
                     else:
-                        p.add_(O, alpha=-lr * rms_scale)
+                        p.add_(O, alpha=-lr)
                     del state['G_low']
                 else:
                     # 1D fallback: plain ZO-SGD with the Nq-averaged g_hat.
