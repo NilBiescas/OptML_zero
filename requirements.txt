@@ -4,3 +4,6 @@ datasets>=2.18
 huggingface_hub>=0.22
 wandb>=0.17
 pyyaml>=6.0
+# optional — only needed for QuZO's 8-bit model loading
+bitsandbytes>=0.41 ; platform_system != "Darwin"
+

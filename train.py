@@ -46,6 +46,7 @@ OPTIMIZER_MODULES = {
     "LOZOM":      "lozo",
     "DiZO":       "dizo",
     "HiZOO":      "hizoo",
+    "QuZO":       "quzo",
 }
 
 
@@ -191,13 +192,25 @@ def main():
     print(f"[Data] task={args.task}  train={len(ds['train'])}  eval={len(val_examples)}")
 
     # ---- Load tokenizer + model (fp16 for H100 throughput; ZO does no backprop) ----
+    # 8-bit loading is supported via `model.load_in_8bit: true` in the YAML —
+    # needed by QuZO to reproduce its paper-faithful memory numbers (~8.1 GB
+    # on LLaMA-7B). Other methods can leave it off (defaults to fp16).
     print(f"[Model] loading {model_name}")
     tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name, trust_remote_code=True, torch_dtype=torch.float16,
-    ).to(device)
+    if cfg.get("model", {}).get("load_in_8bit", False):
+        from transformers import BitsAndBytesConfig
+        print("[Model] using load_in_8bit (bitsandbytes)")
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name, trust_remote_code=True,
+            quantization_config=BitsAndBytesConfig(load_in_8bit=True),
+            device_map={"": 0},
+        )
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name, trust_remote_code=True, torch_dtype=torch.float16,
+        ).to(device)
     model.config.pad_token_id = tokenizer.pad_token_id
     # MeZO-family expects eval-mode forward (no dropout noise in the gradient estimate)
     model.eval()
@@ -217,6 +230,16 @@ def main():
     # ---- Optimizer ----
     optimizer = opt_cls(model.parameters(), **opt_kwargs)
     print(f"[Opt] {opt_name}({opt_kwargs})")
+
+    # ---- Epoch / passes-per-datapoint budget (visible up front) ----
+    steps_per_epoch = max(1, math.ceil(len(train_packs) / batch_size))
+    total_epochs    = max_steps / steps_per_epoch
+    print(f"[Budget] num_train={len(train_packs)}  batch_size={batch_size}  "
+          f"steps_per_epoch={steps_per_epoch}  max_steps={max_steps}  "
+          f"≈ {total_epochs:.1f} epochs (~{total_epochs:.0f} passes per datapoint)")
+    wandb.run.summary["steps_per_epoch"]     = steps_per_epoch
+    wandb.run.summary["planned_epochs"]      = total_epochs
+    wandb.run.summary["passes_per_datapoint"] = total_epochs
 
     # ---- Training loop ----
     if torch.cuda.is_available():
@@ -252,10 +275,12 @@ def main():
         global_step += 1
 
         log = {
-            "train/loss":          float(step_loss["v"].item()) if step_loss["v"] is not None else 0.0,
-            "train/step_time_sec": dt,
+            "train/loss":              float(step_loss["v"].item()) if step_loss["v"] is not None else 0.0,
+            "train/step_time_sec":     dt,
             "train/avg_step_time_sec": sum(step_times) / len(step_times),
-            "train/step":          global_step,
+            "train/step":              global_step,
+            "train/epoch":             global_step / steps_per_epoch,
+            "train/datapoints_seen":   global_step * batch_size,
         }
         if torch.cuda.is_available():
             log["mem/current_MB"] = torch.cuda.memory_allocated() / 1024**2

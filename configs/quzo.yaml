@@ -1,0 +1,23 @@
+# QuZO (Zhou et al., EMNLP 2025). Quantized zeroth-order: 8-bit forward.
+# load_in_8bit: true is required for paper-faithful memory numbers.
+owner: maria
+
+model:
+  name: Qwen/Qwen3.5-0.8B
+  load_in_8bit: true        # bitsandbytes 8-bit base; ~half the memory of fp16
+
+training:
+  seed: 42
+  batch_size: 16
+  max_steps: 12000          # paper default (shorter than 20k MeZO recipe)
+  eval_steps: 500
+  num_train: 1000
+  num_eval: 1000
+
+optimizer:
+  name: QuZO
+  kwargs:
+    lr: 1.0e-6
+    eps: 1.0e-3
+    wbit: 8                 # re-quantize params to 8-bit after each step
+    seed: 42
