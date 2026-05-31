@@ -2,14 +2,16 @@
 # arXiv:2506.09034 — hyperparameters from Table 10 (OPT) + Table 14
 # (perturbation count ablation on SST-2 / OPT-125M):
 #   batch size:  16
-#   learning rate: 1e-5..5e-4 grid (paper Table 10); we pick 1e-5 (lowest,
-#                  most stable; paper's grid corner)
+#   learning rate: 1e-5..5e-4 grid (paper Table 10). We use 1e-6 (smaller
+#                  than the paper grid corner) because our adaptive lr is
+#                  active across the whole run; with sigma_hat ~1e-3-1e-2
+#                  this yields lr_eff ~1e-4-1e-3, matching paper effective lr.
 #   mu (=eps):   1e-3 (paper grid {1e-3, 5e-4, 1e-4})
 #   N (Nq):      8     (Table 14 ablation: best at N=8 on SST-2)
 #   weight decay: 0   (paper uses constant LR, no WD)
-# Step budget: paper's OPT loss curves run to 40,000 forward steps total;
-# with Nq=8 that's ~4,000 optimizer steps. We use 4000 to match.
-# Headline result (Table 7): FZOO FT 90.7%  vs MeZO 90.8%  on OPT-1.3B SST-2.
+# Step budget: paper's OPT loss curves run for ~20K optimizer steps before
+# plateau at ~90.7% (Nq=8, ~180K forwards). Our previous 4000-step run was
+# ~5x short; bumped to 20000. Headline (Table 7): FZOO 90.7% vs MeZO 90.8%.
 
 dataset:
   template: "mezo"
@@ -27,20 +29,21 @@ training:
   epochs: 1
   batch_size: 16
   seed: 0
-  max_steps: 4000
-  eval_steps: 500
+  max_steps: 20000
+  eval_steps: 1000
 
 optimizer:
   name: "FZOO"
   kwargs:
-    lr: 1.0e-5
+    lr: 1.0e-6
     eps: 1.0e-3
     Nq: 8
-    # sigma_floor=1e-6 lets lr_eff explode to lr/1e-6 = 10 at step 0 when
-    # all c_k are ~0 (fresh model). Bumping to 1e-2 caps lr_eff at lr/1e-2 =
-    # 1e-3, which is still ~100x the static lr but bounded enough to avoid
-    # divergence in the first few steps.
-    sigma_floor: 1.0e-2
+    # sigma_floor purely as a numerical guard. Previous 1e-2 capped lr_eff
+    # at 1e-3 and effectively disabled FZOO's std-adaptive scaling -- the
+    # very mechanism the paper attributes its 4x speedup to. The earlier
+    # step-0 explosion was an fp16 artifact; in fp32 with lr=1e-6 the c_k
+    # spread is well-conditioned from step 1.
+    sigma_floor: 1.0e-8
     seed: 0
 
 scheduler:

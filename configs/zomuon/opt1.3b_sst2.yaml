@@ -19,8 +19,11 @@ training:
   epochs: 1
   batch_size: 16
   seed: 0
-  max_steps: 8000
-  eval_steps: 500
+  # Bumped from 8000 to give the RMS-rescaled NS update (Keller Jordan
+  # Muon's max(1, sqrt(out/in))*0.2 factor, added to optimizers/zo_muon.py
+  # this revision) enough budget to reach the paper's ~92% on SST-2.
+  max_steps: 16000
+  eval_steps: 1000
 
 optimizer:
   name: "ZOMuon"

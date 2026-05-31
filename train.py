@@ -201,18 +201,22 @@ def main():
         )
 
         # Capture raw eval examples BEFORE column-stripping, for the
-        # per-candidate LL eval that matches paper accuracy.
-        if "validation" in formatted_dataset:
-            raw_eval_for_paper_acc = [
-                {"prompt":      ex["prompt"],
-                 "all_choices": list(ex["all_choices"]),
-                 "answer_idx":  int(ex["answer_idx"])}
-                for ex in formatted_dataset["validation"]
-            ]
-            accelerator.print(
-                f"Captured {len(raw_eval_for_paper_acc)} raw eval examples "
-                f"for paper-style per-candidate accuracy"
-            )
+        # per-candidate LL eval that matches paper accuracy. Use the held-out
+        # "test" split (= the GLUE validation set, 1000 ex) — what the paper
+        # reports on. The "validation" split here is just the dev carve from
+        # the train pool (500 ex) and inflates accuracy by ~3pp.
+        _paper_eval_split = "test" if "test" in formatted_dataset else "validation"
+        raw_eval_for_paper_acc = [
+            {"prompt":      ex["prompt"],
+             "all_choices": list(ex["all_choices"]),
+             "answer_idx":  int(ex["answer_idx"])}
+            for ex in formatted_dataset[_paper_eval_split]
+        ]
+        accelerator.print(
+            f"Captured {len(raw_eval_for_paper_acc)} raw eval examples "
+            f"for paper-style per-candidate accuracy "
+            f"(from '{_paper_eval_split}' split)"
+        )
 
         # Compute answer_start per example for label-masking in tokenise step.
         # CRITICAL: must use the SAME max_length as tokenize_function below,

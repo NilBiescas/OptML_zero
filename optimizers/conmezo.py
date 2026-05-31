@@ -98,7 +98,15 @@ class ConMeZO(Optimizer):
         alpha = math.sin(theta)
         scale = math.sqrt(max(0.0, 1.0 - alpha * alpha))
 
-        # Forward perturbation: theta <- theta + eps * z'
+        # Phase 0: lazy-init state and accumulate the GLOBAL momentum norm.
+        # Paper Algorithm 1 builds z_t = sqrt(d) * (cos(theta) * mu_global_hat
+        # + sin(theta) * u_global) over the *concatenated* parameter vector --
+        # a single shared cone direction across the whole network. Computing
+        # ||mu||_per_tensor and unit-normalizing per tensor (an earlier bug)
+        # makes each tensor explore its own cone, dispersing exploration and
+        # leaving ~2-3pp on the table vs paper Table 2.
+        mu_norm_sq_global = 0.0
+        total_d           = 0
         for group in self.param_groups:
             for p in group['params']:
                 if not p.requires_grad:
@@ -111,6 +119,21 @@ class ConMeZO(Optimizer):
                     # the cone direction degrades. The buffer cost is small.
                     state['mu']   = torch.zeros(p.shape, dtype=torch.float32,
                                                 device=p.device)
+                mu_norm_sq_global += state['mu'].pow(2).sum().item()
+                total_d           += p.numel()
+        mu_norm_global = math.sqrt(mu_norm_sq_global)
+        sqrt_d         = math.sqrt(total_d)
+        # Scalar that, multiplied by mu_local, yields the local view of
+        # sqrt(d) * cos(theta) * mu_global / ||mu_global||.
+        fac_global = (scale * sqrt_d / mu_norm_global) if mu_norm_global > 0.0 else 0.0
+        cone_active = (self._step_count > 0) and (mu_norm_global > 1e-12)
+
+        # Forward perturbation: theta <- theta + eps * z'
+        for group in self.param_groups:
+            for p in group['params']:
+                if not p.requires_grad:
+                    continue
+                state = self.state[p]
 
                 param_id   = getattr(p, 'param_id', 0)
                 param_seed = seed + state['step'] + param_id * 1000003
@@ -122,32 +145,24 @@ class ConMeZO(Optimizer):
                 z = torch.randn(p.shape, dtype=p.dtype, device=p.device,
                                 generator=state['generator'])
 
-                # ConMeZO cone bias. Paper Algorithm 1 / Eq. 6:
-                #   z_t = sqrt(d) * (cos(theta) * mu_hat + sin(theta) * u_t)
-                # i.e. PARALLEL (mu) component gets cos(theta), and the
-                # ORTHOGONAL (random) component gets sin(theta). At theta=1.35
-                # this is a WIDE cone (~0.98 random, ~0.22 mu) -- intentional
-                # exploration with a soft bias toward momentum.
-                #
-                # Earlier we had cos and sin swapped (cos on z, sin on mu_hat),
-                # producing a NARROW cone that locked the model into the
-                # initial-momentum direction (mode collapse to ~55% paper-acc
-                # on OPT-1.3B SST-2). Fixed in this commit.
-                mu = state['mu']                       # fp32
-                mu_norm_sq = mu.pow(2).sum()           # fp32 scalar
-                if state['step'] == 0 or mu_norm_sq.item() < 1e-24:
+                # ConMeZO cone bias. Paper Algorithm 1 / Eq. 6 on the GLOBAL
+                # flat parameter vector. Per-tensor decomposition:
+                #   z'_local = sin(theta) * z_local + fac_global * mu_local
+                # where fac_global = cos(theta) * sqrt(d_global) / ||mu_global||
+                # and z_local ~ N(0, I) is the local slice of a global z that
+                # approximates a unit-sphere sample after global normalization.
+                # The cos+sin split has cos on the (parallel) mu-direction and
+                # sin on the (orthogonal) random direction; at theta=1.35 this
+                # is a WIDE cone (~0.98 random, ~0.22 mu) -- intentional soft
+                # bias toward momentum (NOT mode-collapse into mu).
+                if not cone_active:
                     # Plain-MeZO warm-up: cone hasn't formed yet.
                     z_prime = z
                 else:
-                    mu_norm = mu_norm_sq.sqrt()
-                    z_fp32  = z.float()
-                    z_norm  = z_fp32.pow(2).sum().sqrt()
-                    mu_hat  = mu / mu_norm             # fp32 / fp32 -> fp32
-                    # Paper: z' = sin(theta) * z + cos(theta) * ||z|| * mu_hat
-                    #         = alpha * z + scale * ||z|| * mu_hat
-                    # (note: alpha=sin, scale=cos, swapped from previous code)
-                    z_prime_fp32 = z_fp32.mul(alpha).add_(mu_hat,
-                                                          alpha=(scale * z_norm).item())
+                    z_fp32 = z.float()
+                    # z'_fp32 = sin(theta) * z + fac_global * mu_local
+                    z_prime_fp32 = z_fp32.mul(alpha).add_(state['mu'],
+                                                          alpha=fac_global)
                     z_prime = z_prime_fp32.to(p.dtype)
 
                 state['z'] = z_prime
