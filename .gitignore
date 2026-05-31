@@ -14,6 +14,7 @@ hf_cache/
 # Local checkpoints
 best_checkpoint/
 last_checkpoint/
+checkpoints/
 
 # Output runs
 runs/
