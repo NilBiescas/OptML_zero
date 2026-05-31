@@ -437,10 +437,17 @@ def main():
     model.config.pad_token_id = tokenizer.pad_token_id
     model.eval()  # ZO assumes no dropout noise in the gradient estimate
 
-    # Param-id injection so distributed ZO RNG stays in lock-step
+    # Param-id + param-name injection.
+    # - param_id keeps per-param RNG seeds in lock-step across ranks (LOZO,
+    #   HiZOO, ZO-Muon, etc. seed each param's generator from this).
+    # - param_name lets methods that key state by parameter name (DiZO's Q/V
+    #   detection, SubZero's per-layer U/V dict, PseuZO's parameter list)
+    #   work with the closure-only optimizer interface — they can read
+    #   `p.param_name` instead of needing `named_parameters()`.
     for i, (name, p) in enumerate(model.named_parameters()):
         if p.requires_grad:
-            p.param_id = i
+            p.param_id   = i
+            p.param_name = name
 
     # ---- Tokenize train + build loader -----------------------------------
     train_packs = [spec.format_train(ex, tokenizer) for ex in ds["train"]]
