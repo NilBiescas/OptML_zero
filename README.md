@@ -16,7 +16,7 @@ apples-to-apples cross-method numbers in one WandB project.
 | Eval period | every 500 steps |
 | GPU         | 1× H100 (works on A100-40G too) |
 | WandB proj  | `Zero-Order-Opt` |
-| Run name    | `{owner}-{method}-{mm_dd_hh_mm_ss}` (UTC) |
+| Run name    | `{owner}-{method}-{task}-{mm_dd_hh_mm_ss}` (UTC) |
 
 Owner must be one of **`maria`**, **`nil`**, **`cheng`** — set via
 `--owner`, `RUN_OWNER` env var, or the `owner:` field in the YAML.

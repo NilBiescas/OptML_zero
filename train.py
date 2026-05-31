@@ -20,7 +20,7 @@ Metrics logged to WandB (project `Zero-Order-Opt`):
 Each run is tagged with [owner, method, task] and grouped by task so the
 WandB dashboard auto-organises by-task.
 
-WandB run name: {owner}-{method}-{mm_dd_hh_mm_ss}  (UTC)
+WandB run name: {owner}-{method}-{task}-{mm_dd_hh_mm_ss}  (UTC)
   owner ∈ {maria, nil, cheng}, read from --owner, $RUN_OWNER, or `owner:`
   in the YAML.
 
@@ -231,7 +231,7 @@ def main():
 
     # ---- WandB: run name + grouping + tags --------------------------------
     stamp    = datetime.now(timezone.utc).strftime("%m_%d_%H_%M_%S")
-    run_name = f"{owner}-{opt_name}-{stamp}"
+    run_name = f"{owner}-{opt_name}-{args.task}-{stamp}"
     wandb.init(
         project="Zero-Order-Opt",
         name=run_name,
