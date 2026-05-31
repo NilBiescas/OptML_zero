@@ -28,6 +28,7 @@ import time
 from datetime import datetime, timezone
 
 import torch
+import torch.nn.functional as F
 import wandb
 import yaml
 from torch.utils.data import DataLoader
@@ -250,6 +251,7 @@ def main():
         torch.cuda.reset_peak_memory_stats()
     step_times = []
     global_step = 0
+    total_forwards_pre = 0   # cumulative closure calls across all completed steps
     train_iter = iter(train_loader)
 
     while global_step < max_steps:
@@ -261,14 +263,48 @@ def main():
         batch = {k: v.to(device) for k, v in batch.items()}
 
         step_loss = {"v": None}
-        def closure():
-            out = model(
-                input_ids=batch["input_ids"],
-                attention_mask=batch["attention_mask"],
-                labels=batch["labels"],
-            )
-            step_loss["v"] = out.loss.detach()
-            return out.loss
+        step_forwards = {"n": 0}
+
+        # Closure protocol:
+        #   closure()                       → returns loss tensor (cheap forward, no grad)
+        #   closure(need_output=True)       → returns (loss, last_hidden, d_loss/d_last_hidden)
+        # The second form is what PseuZO needs (Jacobian-via-output). All other
+        # methods just call the first form. Each call increments the forward
+        # counter so the WandB plot can compare methods on equal forward budgets.
+        def closure(need_output: bool = False):
+            step_forwards["n"] += 1
+            if not need_output:
+                out = model(
+                    input_ids=batch["input_ids"],
+                    attention_mask=batch["attention_mask"],
+                    labels=batch["labels"],
+                )
+                step_loss["v"] = out.loss.detach()
+                return out.loss
+            # Enriched path: cheap forward to capture last hidden state, then a
+            # tiny lm_head + CE pass with grad on JUST the hidden state so the
+            # main model's parameters never see autograd. ~free compared to a
+            # full backward.
+            with torch.no_grad():
+                base_out = model(
+                    input_ids=batch["input_ids"],
+                    attention_mask=batch["attention_mask"],
+                    output_hidden_states=True,
+                )
+            last_hidden = base_out.hidden_states[-1].detach().requires_grad_(True)
+            lm_head = getattr(model, "lm_head", None) or model.get_output_embeddings()
+            with torch.enable_grad():
+                logits = lm_head(last_hidden)
+                shift_logits = logits[..., :-1, :].contiguous()
+                shift_labels = batch["labels"][..., 1:].contiguous()
+                loss_t = F.cross_entropy(
+                    shift_logits.view(-1, shift_logits.size(-1)),
+                    shift_labels.view(-1),
+                    ignore_index=-100,
+                )
+                loss_t.backward()
+            step_loss["v"] = loss_t.detach()
+            return loss_t.detach(), last_hidden.detach(), last_hidden.grad.detach()
 
         t0 = time.perf_counter()
         optimizer.step(closure)
@@ -285,7 +321,10 @@ def main():
             "train/step":              global_step,
             "train/epoch":             global_step / steps_per_epoch,
             "train/datapoints_seen":   global_step * batch_size,
+            "train/forwards_this_step":step_forwards["n"],
+            "train/total_forwards":    total_forwards_pre + step_forwards["n"],
         }
+        total_forwards_pre += step_forwards["n"]
         if torch.cuda.is_available():
             log["mem/current_MB"] = torch.cuda.memory_allocated() / 1024**2
             log["mem/peak_MB"]    = torch.cuda.max_memory_allocated() / 1024**2
@@ -308,6 +347,7 @@ def main():
     # ---- Final summary ----
     summary = {
         "final/total_steps":       global_step,
+        "final/total_forwards":    total_forwards_pre,
         "final/avg_step_time_sec": sum(step_times) / len(step_times),
         "final/total_time_sec":    sum(step_times),
     }

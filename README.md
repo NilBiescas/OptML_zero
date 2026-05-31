@@ -88,9 +88,31 @@ their assigned method from scratch following the paper's reference code.
 Convention:
 - File: `optimizers/<lowercase_name>.py` (e.g. `optimizers/mezo.py`)
 - Class: `<CamelCaseName>(torch.optim.Optimizer)` (e.g. `MeZO`)
-- Must implement `.step(closure)` where `closure()` returns the loss tensor
-  (ZO methods call the closure twice — once for `loss(x + ε·z)` and once for
-  `loss(x − ε·z)` — to estimate the directional derivative).
+- Must implement `.step(closure)` where `closure` follows the protocol below.
+
+### Closure protocol
+
+The harness gives each optimizer a single callable `closure`. Two forms:
+
+```python
+loss = closure()                           # standard ZO path (used by everyone)
+loss, last_hidden, grad_h = closure(need_output=True)   # enriched path (PseuZO)
+```
+
+- **Standard form** — `closure()` returns the loss tensor. Cheap forward,
+  no autograd. Used by MeZO, Sparse-MeZO, HiZOO, QuZO, LOZO, DiZO, SubZero,
+  ZO-Muon, ConMeZO, FZOO.
+- **Enriched form** — `closure(need_output=True)` runs the model up to the
+  last hidden state with no grad, then runs `lm_head + CE loss` with grad
+  enabled on JUST the hidden state. Returns `(loss, last_hidden, ∂L/∂h)`.
+  Used only by PseuZO (needs the Jacobian-via-output for its pseudo-ZO
+  gradient estimate). The main model parameters never see autograd.
+
+Each call to `closure` (either form) counts as **one forward pass** for the
+fairness metric `train/total_forwards` logged to WandB. Methods that do more
+than 2 closures per step (FZOO ~9, ZO-Muon ~8, HiZOO 3) will show higher
+`total_forwards` at the same step count — plot accuracy vs `total_forwards`
+for an apples-to-apples comparison.
 
 The class name in the YAML's `optimizer.name` field must match the class name
 in the module. `train.py:OPTIMIZER_MODULES` maps class name → module file —
