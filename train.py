@@ -6,21 +6,36 @@ import torch
 import time
 import math
 from datasets import load_dataset, DatasetDict
-from transformers import AutoTokenizer, AutoModelForCausalLM, set_seed, DataCollatorForSeq2Seq
+from transformers import AutoTokenizer, AutoModelForCausalLM, set_seed, DataCollatorForSeq2Seq, get_scheduler
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
 from tqdm import tqdm
+from huggingface_hub import HfApi
 
 from optimizers.lozo import LOZOM, LOZO
 from optimizers.sparse_mezo import SparseMeZO
+from optimizers.dizo import DiZO
+from optimizers.mezo import MeZO
+from optimizers.hizoo import HiZOO
 
-# CHECKPOINT_DIR points at a durable mount (a runai PVC, typically
-# /scratch/<JOB_NAME>) so that pods restarted after preemption can resume.
-# Falls back to the pod-local working directory if not set.
-CHECKPOINT_DIR = os.environ.get("CHECKPOINT_DIR", ".")
-LAST_CKPT_PATH = os.path.join(CHECKPOINT_DIR, "last_checkpoint_causal")
-BEST_CKPT_PATH = os.path.join(CHECKPOINT_DIR, "best_checkpoint_causal")
-RESUME_STATE_PATH = os.path.join(CHECKPOINT_DIR, "resume_state.json")
+def _try_pull_checkpoint(repo_id: str) -> None:
+    """Download last_checkpoint_causal/ from HF Hub into the working directory.
+
+    Called at pod startup so a preempted job can resume from the last pushed
+    checkpoint rather than starting from scratch. Silently does nothing if the
+    repo or folder doesn't exist yet (first run).
+    """
+    try:
+        from huggingface_hub import snapshot_download
+        snapshot_download(
+            repo_id=repo_id,
+            local_dir=".",
+            allow_patterns=["last_checkpoint_causal/**"],
+            ignore_patterns=["*.lock"],
+        )
+    except Exception:
+        pass  # repo doesn't exist yet or network error — start fresh
+
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Fine-tune generative model using config")
@@ -41,49 +56,42 @@ def main():
     
     push_to_hub = hub_config.get('push_to_hub', False)
     repo_id = hub_config.get('repo_id', None)
-    
+
     seed = train_config.get('seed', 42)
     batch_size = train_config.get('batch_size', 16)
     epochs = train_config.get('epochs', 3)
     max_tokens = train_config.get('max_tokens', None)
-    
+    eval_steps = train_config.get('eval_steps', None)
+    eval_epochs = train_config.get('eval_epochs', 1)
+
     # Initialize accelerator
     accelerator = Accelerator(log_with="wandb")
-
-    # Look for a previous checkpoint on the durable mount (CHECKPOINT_DIR).
-    # If found, resume from it; otherwise start fresh from the base model.
-    resume_state = None
-    if accelerator.is_local_main_process:
-        os.makedirs(CHECKPOINT_DIR, exist_ok=True)
-    accelerator.wait_for_everyone()
-    if os.path.isfile(RESUME_STATE_PATH) and os.path.isdir(LAST_CKPT_PATH):
-        with open(RESUME_STATE_PATH) as f:
-            resume_state = json.load(f)
-        accelerator.print(f">>> Resuming from {LAST_CKPT_PATH} | state={resume_state}")
-    else:
-        accelerator.print(f">>> No resumable checkpoint at {CHECKPOINT_DIR} (starting fresh)")
-
-    # Try to set the WandB run name to match the RunAI job name; resume the
-    # same WandB run id if we found one in the resume state.
+    
+    # Try to set the WandB run name to match the RunAI job name
     run_name = os.environ.get("RUN_NAME", None)
-    wandb_kwargs = {}
+    wandb_kwargs = {"entity": "nilbiescas3"}
     if run_name:
         wandb_kwargs["name"] = run_name
-    if resume_state and resume_state.get("wandb_run_id"):
-        wandb_kwargs["id"] = resume_state["wandb_run_id"]
-        wandb_kwargs["resume"] = "allow"
-    init_kwargs = {"init_kwargs": {"wandb": wandb_kwargs}} if wandb_kwargs else {}
+    init_kwargs = {"init_kwargs": {"wandb": wandb_kwargs}}
 
     accelerator.init_trackers(project_name="lozo-generative-training", config=config, **init_kwargs)
-
-    # Capture the wandb run id so we can persist it for future resumes.
-    wandb_run_id = None
-    if accelerator.is_local_main_process:
-        try:
-            wandb_run_id = accelerator.get_tracker("wandb").run.id
-        except Exception:
-            pass
     
+    # --- Preemption resume: pull last checkpoint from HF Hub before anything else ---
+    resume_state = None
+    if push_to_hub and repo_id:
+        with accelerator.main_process_first():
+            _try_pull_checkpoint(repo_id)
+        _state_path = "last_checkpoint_causal/training_state.json"
+        if os.path.exists(_state_path):
+            with open(_state_path) as _f:
+                resume_state = json.load(_f)
+            accelerator.print(
+                f"[Resume] Found checkpoint — epoch {resume_state['epoch']}, "
+                f"step {resume_state['global_step']}. Resuming."
+            )
+        else:
+            accelerator.print("[Resume] No checkpoint on HF Hub — starting fresh.")
+
     # Crucial: set seed across all processes to ensure deterministic initializations
     set_seed(seed)
     torch.manual_seed(seed)
@@ -180,10 +188,11 @@ def main():
                 "test": tokenized_datasets["test"]
             })
             
-    # Load model — from resume checkpoint if we have one, else the base model.
-    model_load_path = LAST_CKPT_PATH if resume_state else model_name
-    accelerator.print(f"Loading model weights from: {model_load_path}")
-    model = AutoModelForCausalLM.from_pretrained(model_load_path, trust_remote_code=True)
+    # Load model — from local checkpoint when resuming, otherwise from HF Hub
+    _ckpt_dir = "last_checkpoint_causal"
+    _model_src = _ckpt_dir if (resume_state and os.path.exists(_ckpt_dir)) else model_name
+    accelerator.print(f"Loading model from: {_model_src}")
+    model = AutoModelForCausalLM.from_pretrained(_model_src, trust_remote_code=True)
     model.config.pad_token_id = tokenizer.pad_token_id
     
     # Use DataCollatorForSeq2Seq which handles dynamic padding of inputs and pads labels with -100
@@ -211,6 +220,7 @@ def main():
     for i, (name, p) in enumerate(model.named_parameters()):
         if p.requires_grad:
             p.param_id = i
+            p.param_name = name
 
     # Print a few examples to verify formatting and masking
     if accelerator.is_local_main_process:
@@ -233,7 +243,7 @@ def main():
     opt_name = opt_config.get('name', 'LOZO')
     opt_kwargs = opt_config.get('kwargs', {})
     
-    is_zeroth_order = opt_name in ["LOZO", "LOZOM", "SparseMeZO"]
+    is_zeroth_order = opt_name in ["LOZO", "LOZOM", "SparseMeZO", "DiZO", "MeZO", "HiZOO"]
 
     if is_zeroth_order:
         model.to(accelerator.device)
@@ -241,14 +251,76 @@ def main():
             optimizer = LOZOM(model.parameters(), **opt_kwargs)
         elif opt_name == "SparseMeZO":
             optimizer = SparseMeZO(model.parameters(), **opt_kwargs)
+        elif opt_name == "DiZO":
+            optimizer = DiZO(model.parameters(), **opt_kwargs)
+        elif opt_name == "MeZO":
+            optimizer = MeZO(model.parameters(), **opt_kwargs)
+        elif opt_name == "HiZOO":
+            optimizer = HiZOO(model.parameters(), **opt_kwargs)
         else:
             optimizer = LOZO(model.parameters(), **opt_kwargs)
-            
+
+        _opt_state_path = "last_checkpoint_causal/optimizer_state.pt"
+        if resume_state and os.path.exists(_opt_state_path):
+            accelerator.print("Loading ZO optimizer state for resume...")
+            try:
+                optimizer.load_state_dict(
+                    torch.load(_opt_state_path, map_location=accelerator.device, weights_only=False)
+                )
+            except Exception as e:
+                accelerator.print(f"Warning: Could not load optimizer state ({e}).")
+                accelerator.print(f"Syncing optimizer step count from global_step ({resume_state['global_step']}) instead.")
+                for group in optimizer.param_groups:
+                    for p in group['params']:
+                        optimizer.state[p]['step'] = resume_state['global_step']
+
         optimizer, train_dataloader = accelerator.prepare(optimizer, train_dataloader)
         if eval_dataloader:
             eval_dataloader = accelerator.prepare(eval_dataloader)
         if test_dataloader:
             test_dataloader = accelerator.prepare(test_dataloader)
+            
+        # Scheduler setup (Optional)
+        lr_scheduler = None
+        if 'lr_scheduler' in train_config:
+            scheduler_config = train_config.get('lr_scheduler', {})
+            scheduler_type = scheduler_config.get('type', 'linear')
+            warmup_ratio = scheduler_config.get('warmup_ratio', 0.0)
+            warmup_steps = scheduler_config.get('warmup_steps', 0)
+            start_lr = scheduler_config.get('start_lr', 0.0)
+            
+            if max_tokens is not None:
+                # Estimate steps if max_tokens is used (approximation)
+                avg_tokens_per_batch = 128 
+                num_training_steps = max_tokens // (avg_tokens_per_batch * accelerator.num_processes)
+            else:
+                num_training_steps = len(train_dataloader) * epochs
+                
+            if warmup_steps == 0 and warmup_ratio > 0:
+                num_warmup_steps = int(num_training_steps * warmup_ratio)
+            else:
+                num_warmup_steps = warmup_steps
+    
+            if start_lr > 0:
+                peak_lr = opt_config.get('kwargs', {}).get('lr', 1e-6)
+                def lr_lambda(current_step):
+                    if current_step < num_warmup_steps:
+                        return (start_lr + (peak_lr - start_lr) * float(current_step) / float(max(1, num_warmup_steps))) / peak_lr
+                    if scheduler_type == "linear":
+                        return max(0.0, float(num_training_steps - current_step) / float(max(1, num_training_steps - num_warmup_steps)))
+                    elif scheduler_type == "cosine":
+                        progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
+                        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
+                    return 1.0
+                lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+            else:
+                lr_scheduler = get_scheduler(
+                    name=scheduler_type,
+                    optimizer=optimizer,
+                    num_warmup_steps=num_warmup_steps,
+                    num_training_steps=num_training_steps,
+                )
+            lr_scheduler = accelerator.prepare(lr_scheduler)
     else:
         # Standard first-order optimizer
         if hasattr(torch.optim, opt_name):
@@ -256,27 +328,170 @@ def main():
             optimizer = opt_class(model.parameters(), **opt_kwargs)
         else:
             raise ValueError(f"Optimizer {opt_name} not found in torch.optim or custom definitions.")
-            
+
+        _opt_state_path = "last_checkpoint_causal/optimizer_state.pt"
+        if resume_state and os.path.exists(_opt_state_path):
+            accelerator.print("Loading FO optimizer state for resume...")
+            try:
+                optimizer.load_state_dict(
+                    torch.load(_opt_state_path, map_location=accelerator.device, weights_only=False)
+                )
+            except Exception as e:
+                accelerator.print(f"Warning: Could not load FO optimizer state ({e}).")
+
         model, optimizer, train_dataloader = accelerator.prepare(model, optimizer, train_dataloader)
         if eval_dataloader:
             eval_dataloader = accelerator.prepare(eval_dataloader)
         if test_dataloader:
             test_dataloader = accelerator.prepare(test_dataloader)
             
-    accelerator.print(f"Starting training for {epochs} epochs using {opt_name} optimizer")
+    # Optional LR scheduler (cosine with linear warmup). Configured via YAML.
+    sched_cfg = config.get('scheduler', {}) or {}
+    scheduler = None
+    if sched_cfg.get('type') == 'cosine':
+        from torch.optim.lr_scheduler import LambdaLR
+        steps_per_epoch = len(train_dataloader)
+        warmup_steps   = int(sched_cfg.get('warmup_steps', 0))
+        t_max_epochs   = int(sched_cfg.get('t_max_epochs', epochs))
+        t_max_steps    = max(1, t_max_epochs * steps_per_epoch)
+        eta_min_ratio  = float(sched_cfg.get('eta_min_ratio', 0.0))
 
+        def lr_lambda(step):
+            if step < warmup_steps:
+                return float(step + 1) / float(max(1, warmup_steps))
+            progress = (step - warmup_steps) / float(max(1, t_max_steps - warmup_steps))
+            progress = min(1.0, progress)
+            return eta_min_ratio + (1.0 - eta_min_ratio) * 0.5 * (1.0 + math.cos(math.pi * progress))
+
+        scheduler = LambdaLR(optimizer, lr_lambda, last_epoch=-1)
+        accelerator.print(
+            f"[Scheduler] cosine | warmup={warmup_steps} | t_max_steps={t_max_steps} "
+            f"({t_max_epochs} epochs) | eta_min_ratio={eta_min_ratio}"
+        )
+
+        _sched_state_path = "last_checkpoint_causal/scheduler_state.pt"
+        if resume_state and os.path.exists(_sched_state_path):
+            accelerator.print("Loading scheduler state for resume...")
+            scheduler.load_state_dict(torch.load(_sched_state_path, weights_only=False))
+
+    accelerator.print(f"Starting training for {epochs} epochs using {opt_name} optimizer")
+    
+    global_step       = resume_state['global_step']       if resume_state else 0
+    best_eval_loss    = resume_state['best_eval_loss']    if resume_state else float('inf')
+    total_tokens_seen = resume_state['total_tokens_seen'] if resume_state else 0
+    epoch             = resume_state['epoch']             if resume_state else 0
     run_start_time = time.time()
-    if resume_state:
-        epoch = resume_state.get("epoch", 0)
-        global_step = resume_state.get("global_step", 0)
-        best_eval_loss = resume_state.get("best_eval_loss", float('inf'))
-        total_tokens_seen = resume_state.get("total_tokens_seen", 0)
-        accelerator.print(f">>> Resuming at epoch={epoch} step={global_step} best_eval_loss={best_eval_loss:.4f} tokens={total_tokens_seen}")
-    else:
-        epoch = 0
-        global_step = 0
-        best_eval_loss = float('inf')
-        total_tokens_seen = 0
+
+    def run_evaluation(curr_epoch, curr_global_step):
+        nonlocal best_eval_loss
+        if not eval_dataloader:
+            return
+        
+        accelerator.print(f"\n--- Starting Evaluation (Epoch {curr_epoch+1}, Step {curr_global_step}) ---")
+        model.eval()
+        total_eval_loss = 0
+        correct_tokens = 0
+        total_tokens = 0
+        eval_unwrapped_model = accelerator.unwrap_model(model)
+        with torch.no_grad():
+            for eval_step_idx, batch in enumerate(eval_dataloader):
+                batch = {k: v.to(accelerator.device) for k, v in batch.items()}
+                outputs = eval_unwrapped_model(
+                    input_ids=batch["input_ids"],
+                    attention_mask=batch["attention_mask"],
+                    labels=batch["labels"]
+                )
+                eval_loss = outputs.loss
+                avg_loss = accelerator.reduce(eval_loss.detach(), reduction="mean")
+                total_eval_loss += avg_loss.item()
+                
+                # Compute token-level accuracy
+                shift_logits = outputs.logits[..., :-1, :].contiguous()
+                shift_labels = batch["labels"][..., 1:].contiguous()
+                predictions = shift_logits.argmax(dim=-1)
+                
+                local_mask = (shift_labels != -100)
+                local_correct = (predictions[local_mask] == shift_labels[local_mask]).sum().to(accelerator.device)
+                local_total = local_mask.sum().to(accelerator.device)
+                
+                batch_correct = accelerator.reduce(local_correct, reduction="sum")
+                batch_total = accelerator.reduce(local_total, reduction="sum")
+                
+                correct_tokens += batch_correct.item()
+                total_tokens += batch_total.item()
+                    
+        avg_eval_loss = total_eval_loss / len(eval_dataloader)
+        perplexity = math.exp(avg_eval_loss) if avg_eval_loss < 20 else float('inf')
+        token_acc = correct_tokens / total_tokens if total_tokens > 0 else 0.0
+        elapsed_since_start = time.time() - run_start_time
+        
+        accelerator.print(f"Eval: Epoch {curr_epoch+1} | Step {curr_global_step} | Loss: {avg_eval_loss:.4f} | Perplexity: {perplexity:.2f} | Token Accuracy: {token_acc:.4f}")
+        accelerator.log({
+            "eval_loss": avg_eval_loss,
+            "perplexity": perplexity,
+            "eval_token_accuracy": token_acc,
+            "total_elapsed_time_sec": elapsed_since_start,
+            "epoch": curr_epoch+1
+        }, step=curr_global_step)
+        
+        if accelerator.is_local_main_process:
+            accelerator.print("Saving checkpoints on main process...")
+            unwrapped_model = accelerator.unwrap_model(model)
+            if avg_eval_loss < best_eval_loss:
+                best_eval_loss = avg_eval_loss
+                accelerator.print(f"New best validation loss ({avg_eval_loss:.4f})! Saving and pushing best_checkpoint_causal...")
+                unwrapped_model.save_pretrained("best_checkpoint_causal")
+                tokenizer.save_pretrained("best_checkpoint_causal")
+                
+                # Push BEST checkpoint to hub immediately
+                if push_to_hub and repo_id:
+                    try:
+                        _api = HfApi()
+                        _api.create_repo(repo_id=repo_id, exist_ok=True)
+                        _api.upload_folder(
+                            folder_path="best_checkpoint_causal",
+                            repo_id=repo_id,
+                            path_in_repo="best_checkpoint_causal",
+                            commit_message=f"New best model: epoch {curr_epoch+1} step {curr_global_step} loss {avg_eval_loss:.4f}",
+                        )
+                        accelerator.print("Best checkpoint pushed to HF Hub.")
+                    except Exception as _e:
+                        accelerator.print(f"Warning: Best checkpoint push failed: {_e}")
+                
+            accelerator.print("Saving last_checkpoint_causal...")
+            unwrapped_model.save_pretrained("last_checkpoint_causal")
+            tokenizer.save_pretrained("last_checkpoint_causal")
+
+            # Persist training state and optimizer state for preemption recovery
+            with open("last_checkpoint_causal/training_state.json", "w") as _sf:
+                json.dump({
+                    "epoch":             curr_epoch + 1,
+                    "global_step":       curr_global_step,
+                    "best_eval_loss":    best_eval_loss,
+                    "total_tokens_seen": total_tokens_seen,
+                }, _sf)
+            torch.save(optimizer.state_dict(), "last_checkpoint_causal/optimizer_state.pt")
+            if scheduler is not None:
+                torch.save(scheduler.state_dict(), "last_checkpoint_causal/scheduler_state.pt")
+            accelerator.print("Checkpoints saved successfully.")
+
+            if push_to_hub and repo_id:
+                try:
+                    _api = HfApi()
+                    _api.create_repo(repo_id=repo_id, exist_ok=True)
+                    _api.upload_folder(
+                        folder_path="last_checkpoint_causal",
+                        repo_id=repo_id,
+                        path_in_repo="last_checkpoint_causal",
+                        commit_message=f"Resume checkpoint epoch {curr_epoch+1} step {curr_global_step}",
+                    )
+                    accelerator.print(f"Checkpoint pushed to HF Hub.")
+                except Exception as _e:
+                    accelerator.print(f"Warning: HF Hub push failed: {_e}")
+        
+        accelerator.wait_for_everyone()
+        accelerator.print(f"--- Evaluation Complete ---\n")
+
     while True:
         if max_tokens is None and epoch >= epochs:
             break
@@ -339,6 +554,8 @@ def main():
                 progress_bar.set_description(f"Epoch {epoch+1} Loss: {loss.item():.4f}")
                 train_loss_val = loss.item()
                 
+            if lr_scheduler is not None:
+                lr_scheduler.step()
             step_time = time.time() - step_start_time
             local_bsz = batch["labels"].size(0)
             
@@ -349,17 +566,23 @@ def main():
             
             samples_per_second = (local_bsz * accelerator.num_processes) / step_time
             
+            if scheduler is not None:
+                scheduler.step()
+
             log_metrics = {
                 "train_loss": train_loss_val,
+                "learning_rate": optimizer.param_groups[0]['lr'],
                 "step_time_sec": step_time,
                 "samples_per_second": samples_per_second,
-                "total_tokens_seen": total_tokens_seen
+                "total_tokens_seen": total_tokens_seen,
+                "lr": optimizer.param_groups[0]['lr'],
             }
             if torch.cuda.is_available():
                 log_metrics["gpu_memory_MB"] = torch.cuda.max_memory_allocated() / (1024 ** 2)
-                
+
             accelerator.log(log_metrics, step=global_step)
             global_step += 1
+            
             
             if max_tokens is not None and total_tokens_seen >= max_tokens:
                 accelerator.print(f"Reached max_tokens ({max_tokens}). Stopping training loop.")
@@ -368,97 +591,9 @@ def main():
         avg_train_loss = total_loss / (len(train_dataloader) if len(train_dataloader) > 0 else 1)
         accelerator.print(f"Epoch {epoch+1} finished. Avg train loss: {avg_train_loss:.4f} | Total tokens seen: {total_tokens_seen}")
         
-        # Evaluation
-        if eval_dataloader:
-            accelerator.print(f"\n--- Starting Evaluation for Epoch {epoch+1} ---")
-            model.eval()
-            total_eval_loss = 0
-            correct_tokens = 0
-            total_tokens = 0
-            eval_unwrapped_model = accelerator.unwrap_model(model)
-            with torch.no_grad():
-                for eval_step_idx, batch in enumerate(eval_dataloader):
-                    # if eval_step_idx % 10 == 0 and accelerator.is_local_main_process:
-                    #     accelerator.print(f"[Eval Epoch {epoch+1}] Processing batch {eval_step_idx}/{len(eval_dataloader)}")
-                    batch = {k: v.to(accelerator.device) for k, v in batch.items()}
-                    outputs = eval_unwrapped_model(
-                        input_ids=batch["input_ids"],
-                        attention_mask=batch["attention_mask"],
-                        labels=batch["labels"]
-                    )
-                    eval_loss = outputs.loss
-                    avg_loss = accelerator.reduce(eval_loss.detach(), reduction="mean")
-                    total_eval_loss += avg_loss.item()
-                    
-                    # Compute token-level accuracy over prediction targets
-                    # Shift logits and labels so that prediction L_i aligns with target y_{i+1}
-                    shift_logits = outputs.logits[..., :-1, :].contiguous()
-                    shift_labels = batch["labels"][..., 1:].contiguous()
-                    predictions = shift_logits.argmax(dim=-1)
-                    
-                    local_mask = (shift_labels != -100)
-                    local_correct = (predictions[local_mask] == shift_labels[local_mask]).sum().to(accelerator.device)
-                    local_total = local_mask.sum().to(accelerator.device)
-                    
-                    # Reduce scalars across all GPUs (100% robust against differing dynamic padding seq_len across GPUs)
-                    batch_correct = accelerator.reduce(local_correct, reduction="sum")
-                    batch_total = accelerator.reduce(local_total, reduction="sum")
-                    
-                    correct_tokens += batch_correct.item()
-                    total_tokens += batch_total.item()
-                    
-                    # if eval_step_idx == 0 and accelerator.is_local_main_process and local_mask.sum() > 0:
-                    #     sample_preds = predictions[local_mask][:20]
-                    #     sample_targets = shift_labels[local_mask][:20]
-                    #     pred_str = tokenizer.decode(sample_preds)
-                    #     target_str = tokenizer.decode(sample_targets)
-                    #     accelerator.print(f"\n[EVAL SANITY CHECK] Sample predictions decoded: {repr(pred_str)}")
-                    #     accelerator.print(f"[EVAL SANITY CHECK] Sample targets decoded:     {repr(target_str)}\n")
-                        
-            avg_eval_loss = total_eval_loss / len(eval_dataloader)
-            perplexity = math.exp(avg_eval_loss) if avg_eval_loss < 20 else float('inf')
-            token_acc = correct_tokens / total_tokens if total_tokens > 0 else 0.0
-            elapsed_since_start = time.time() - run_start_time
-            
-            accelerator.print(f"Epoch {epoch+1} Eval Loss: {avg_eval_loss:.4f} | Perplexity: {perplexity:.2f} | Token Accuracy: {token_acc:.4f} | Elapsed Time: {elapsed_since_start:.2f}s")
-            accelerator.log({
-                "eval_loss": avg_eval_loss,
-                "perplexity": perplexity,
-                "eval_token_accuracy": token_acc,
-                "total_elapsed_time_sec": elapsed_since_start,
-                "epoch": epoch+1
-            }, step=global_step)
-            
-            if accelerator.is_local_main_process:
-                accelerator.print(f"Saving checkpoints to {CHECKPOINT_DIR}...")
-                unwrapped_model = accelerator.unwrap_model(model)
-                if avg_eval_loss < best_eval_loss:
-                    best_eval_loss = avg_eval_loss
-                    accelerator.print(f"New best validation loss ({avg_eval_loss:.4f})! Saving best_checkpoint_causal...")
-                    unwrapped_model.save_pretrained(BEST_CKPT_PATH)
-                    tokenizer.save_pretrained(BEST_CKPT_PATH)
+        if (epoch + 1) % eval_epochs == 0:
+            run_evaluation(epoch, global_step)
 
-                accelerator.print("Saving last_checkpoint_causal...")
-                unwrapped_model.save_pretrained(LAST_CKPT_PATH)
-                tokenizer.save_pretrained(LAST_CKPT_PATH)
-                accelerator.print("Checkpoints saved successfully.")
-
-                # Persist resume state on the durable mount so a restarted pod
-                # can pick up exactly here.
-                state_payload = {
-                    "epoch": epoch + 1,
-                    "global_step": global_step,
-                    "best_eval_loss": best_eval_loss,
-                    "total_tokens_seen": total_tokens_seen,
-                    "wandb_run_id": wandb_run_id,
-                }
-                with open(RESUME_STATE_PATH, "w") as f:
-                    json.dump(state_payload, f)
-
-            # CRITICAL MULTI-GPU BARRIER: Wait for main process to finish disk I/O before continuing training!
-            accelerator.wait_for_everyone()
-            accelerator.print(f"--- Evaluation for Epoch {epoch+1} Complete ---\n")
-                
         epoch += 1
         # This condition is now redundant as max_tokens logic is handled per batch step
         # if max_tokens is not None and total_tokens_seen >= max_tokens:
@@ -471,9 +606,9 @@ def main():
     # Final evaluation on unseen test set
     if test_dataloader:
         accelerator.print("\n=== Running Final Evaluation on the Unseen Test Set ===")
-        if os.path.exists(BEST_CKPT_PATH):
-            accelerator.print(f"Loading best causal checkpoint from {BEST_CKPT_PATH} for final test evaluation...")
-            model = AutoModelForCausalLM.from_pretrained(BEST_CKPT_PATH, trust_remote_code=True).to(accelerator.device)
+        if os.path.exists("best_checkpoint_causal"):
+            accelerator.print("Loading best causal checkpoint for final test evaluation...")
+            model = AutoModelForCausalLM.from_pretrained("best_checkpoint_causal", trust_remote_code=True).to(accelerator.device)
             
         model.eval()
         total_test_loss = 0
@@ -519,21 +654,20 @@ def main():
     accelerator.wait_for_everyone()
     
     if push_to_hub and repo_id and accelerator.is_local_main_process:
-        from huggingface_hub import HfApi
         api = HfApi()
         accelerator.print(f"Pushing causal checkpoints to Hugging Face Hub: {repo_id}")
         api.create_repo(repo_id=repo_id, exist_ok=True)
         
-        if os.path.exists(BEST_CKPT_PATH):
+        if os.path.exists("best_checkpoint_causal"):
             api.upload_folder(
-                folder_path=BEST_CKPT_PATH,
+                folder_path="best_checkpoint_causal",
                 repo_id=repo_id,
                 path_in_repo="best_checkpoint_causal",
                 commit_message="Upload best causal checkpoint"
             )
-        if os.path.exists(LAST_CKPT_PATH):
+        if os.path.exists("last_checkpoint_causal"):
             api.upload_folder(
-                folder_path=LAST_CKPT_PATH,
+                folder_path="last_checkpoint_causal",
                 repo_id=repo_id,
                 path_in_repo="last_checkpoint_causal",
                 commit_message="Upload last causal checkpoint"

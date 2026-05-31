@@ -19,3 +19,27 @@ last_checkpoint/
 runs/
 LOZO/
 .deploy_keys/
+# Environment variables
+.env
+
+# Python caches
+__pycache__/
+*.pyc
+
+# Weights & Biases
+wandb/
+
+# Hugging Face cache
+hf_cache/
+
+# Local checkpoints
+best_checkpoint/
+last_checkpoint/
+
+#Output runs
+runs/
+#LOZO/
+
+# Ignore heavy dataset files
+LOZO/data/datasets.tar
+LOZO/data/original/

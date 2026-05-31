@@ -4,7 +4,7 @@ import argparse
 import torch
 import time
 from datasets import load_dataset, DatasetDict
-from transformers import AutoTokenizer, AutoModelForSequenceClassification, set_seed, DataCollatorWithPadding
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, set_seed, DataCollatorWithPadding, get_scheduler
 from accelerate import Accelerator
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -57,21 +57,77 @@ def main():
     torch.backends.cudnn.benchmark = False
     
     dataset_name = dataset_config.get('name', 'PolyAI/banking77')
+    dataset_subset = dataset_config.get('subset', None)
+    data_files = dataset_config.get('data_files', None)
+    delimiter = dataset_config.get('delimiter', None)
     text_col = dataset_config.get('text_column', 'text')
+    text_col2 = dataset_config.get('text_column2', None)
     label_col = dataset_config.get('label_column', 'label')
     
-    accelerator.print(f"Loading dataset {dataset_name}...")
-    dataset = load_dataset(dataset_name)
+    load_kwargs = {}
+    if data_files:
+        load_kwargs['data_files'] = data_files
+    if delimiter:
+        load_kwargs['delimiter'] = delimiter
+        if delimiter == '\t':
+            import csv
+            load_kwargs['quoting'] = csv.QUOTE_NONE
+
+    accelerator.print(f"Loading dataset {dataset_name} (subset: {dataset_subset}) with kwargs {load_kwargs}...")
+    try:
+        if dataset_subset:
+            dataset = load_dataset(dataset_name, dataset_subset, **load_kwargs)
+        else:
+            dataset = load_dataset(dataset_name, **load_kwargs)
+    except Exception as e:
+        accelerator.print(f"Failed to load dataset with HuggingFace datasets ({e}). Falling back to robust manual TSV loading...")
+        import pandas as pd
+        from datasets import Dataset, DatasetDict
+        splits = {}
+        for split, path in data_files.items():
+            with open(path, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+            header = lines[0].strip('\n').split('\t')
+            records = []
+            for line in lines[1:]:
+                parts = line.strip('\n').split('\t')
+                if len(parts) > len(header):
+                    parts = parts[:len(header)]
+                elif len(parts) < len(header):
+                    parts = parts + [""] * (len(header) - len(parts))
+                records.append({h: p for h, p in zip(header, parts)})
+            splits[split] = Dataset.from_pandas(pd.DataFrame(records))
+        dataset = DatasetDict(splits)
+    
+    few_shot_k = train_config.get('few_shot_k', None)
+    if few_shot_k is not None:
+        accelerator.print(f"Subsampling train set to {few_shot_k} shots per class (k={few_shot_k})...")
+        df = dataset["train"].to_pandas()
+        # Ensure we drop any '-1' labels from train set if they exist
+        if label_col in df.columns:
+            df = df[df[label_col] != -1]
+            df = df.groupby(label_col, group_keys=False).apply(lambda x: x.sample(n=min(len(x), few_shot_k), random_state=seed)).reset_index(drop=True)
+        from datasets import Dataset
+        dataset["train"] = Dataset.from_pandas(df)
+
     
     model_name = model_config.get('name', 'Qwen/Qwen3.5-0.8B')
     
     accelerator.print(f"Dataset columns: {dataset['train'].column_names}")
     
+    label_col = dataset_config.get("label_column", "label")
+    if label_col not in dataset["train"].column_names:
+        for p in ["label", "gold_label", "label1"]:
+            if p in dataset["train"].column_names:
+                accelerator.print(f"Warning: configured label column '{dataset_config.get('label_column', 'label')}' not found. Auto-detected '{p}'.")
+                label_col = p
+                break
+
     # Robustly map labels from the dataset to ensure they are [0, num_labels-1]
     if label_col in dataset["train"].column_names:
         raw_labels = dataset["train"][label_col]
-        # Ensure labels are treated as integers for correct sorting and mapping
-        unique_labels = sorted(set(int(x) for x in raw_labels))
+        # Filter out '-1', '-', and '' regardless of if it's a string or int
+        unique_labels = sorted(set(x for x in raw_labels if str(x).strip() not in ["-1", "-", ""]))
         label2id = {label: idx for idx, label in enumerate(unique_labels)}
         id2label = {idx: str(label) for label, idx in label2id.items()}
         num_labels = len(unique_labels)
@@ -89,10 +145,14 @@ def main():
     
     # We do not pad to max_length here. We truncate to 128 and use dynamic padding.
     def tokenize_function(examples):
-        tokenized = tokenizer(examples[text_col], truncation=True, max_length=128)
+        if text_col2:
+            tokenized = tokenizer(examples[text_col], examples[text_col2], truncation=True, max_length=128)
+        else:
+            tokenized = tokenizer(examples[text_col], truncation=True, max_length=128)
+        
         if label2id is not None:
-            # Ensure label is converted to int before mapping lookup
-            tokenized["labels"] = [label2id[int(label)] for label in examples[label_col]]
+            # Look up label in mapping, ignore -1, -, and empty string
+            tokenized["labels"] = [label2id[label] if str(label).strip() not in ["-1", "-", ""] else -1 for label in examples[label_col]]
         else:
             # Fallback if no mapping exists
             tokenized["labels"] = [int(label) for label in examples[label_col]]
@@ -100,13 +160,15 @@ def main():
     
     accelerator.print("Tokenizing dataset...")
     with accelerator.main_process_first():
-        remove_cols = dataset["train"].column_names
-        tokenized_datasets = dataset.map(
-            tokenize_function, 
-            batched=True, 
-            remove_columns=remove_cols,
-            load_from_cache_file=False # Force re-mapping for debugging
-        )
+        tokenized_datasets = DatasetDict({
+            split: dataset[split].map(
+                tokenize_function, 
+                batched=True, 
+                remove_columns=dataset[split].column_names,
+                load_from_cache_file=False
+            )
+            for split in dataset.keys()
+        })
         
         # Verify labels are 0-indexed for the first few samples
         for i in range(min(5, len(tokenized_datasets['train']))):
@@ -114,15 +176,25 @@ def main():
 
         tokenized_datasets.set_format("torch")
             
+        # Handle MNLI splits explicitly
+        if "validation" not in tokenized_datasets and "validation_matched" in tokenized_datasets:
+            accelerator.print("Using 'validation_matched' as validation split.")
+            tokenized_datasets["validation"] = tokenized_datasets["validation_matched"]
+        if "test" not in tokenized_datasets and "validation_mismatched" in tokenized_datasets:
+            accelerator.print("Using 'validation_mismatched' as test split.")
+            tokenized_datasets["test"] = tokenized_datasets["validation_mismatched"]
+
         # Dynamically split 'train' to create a validation split if not present
-        if "test" in tokenized_datasets and "validation" not in tokenized_datasets:
+        if "validation" not in tokenized_datasets:
             accelerator.print("Splitting training set to create a dynamic 'validation' split (10%)...")
             split_dataset = tokenized_datasets["train"].train_test_split(test_size=0.1, seed=seed)
-            tokenized_datasets = DatasetDict({
+            new_splits = {
                 "train": split_dataset["train"],
-                "validation": split_dataset["test"],
-                "test": tokenized_datasets["test"]
-            })
+                "validation": split_dataset["test"]
+            }
+            if "test" in tokenized_datasets:
+                new_splits["test"] = tokenized_datasets["test"]
+            tokenized_datasets = DatasetDict(new_splits)
             
     # Use DataCollatorWithPadding for dynamic padding (makes training up to 4x faster!)
     data_collator = DataCollatorWithPadding(tokenizer=tokenizer)
@@ -179,12 +251,17 @@ def main():
     
     # EMERGENCY OVERRIDE: Ensure the model head matches num_labels
     head = getattr(model, "score", getattr(model, "classifier", None))
-    if head is None or model.config.num_labels != num_labels or head.out_features != num_labels:
+    
+    # Safely get out_features and in_features depending on head type
+    head_out = getattr(head, "out_features", getattr(getattr(head, "out_proj", None), "out_features", None))
+    head_in = getattr(head, "in_features", getattr(getattr(head, "dense", None), "in_features", None))
+    
+    if head is None or model.config.num_labels != num_labels or (head_out is not None and head_out != num_labels):
         accelerator.print(f"CRITICAL WARNING: Model head mismatch detected. Re-initializing head to {num_labels} labels...")
-        in_features = head.in_features if head is not None else getattr(model.config, "hidden_size", 1024)
-        bias = head.bias is not None if head is not None else False
+        in_features = head_in if head_in is not None else getattr(model.config, "hidden_size", 1024)
         
-        new_head = torch.nn.Linear(in_features, num_labels, bias=bias)
+        # If it's a RoBERTa model, we should ideally recreate the RobertaClassificationHead, but a Linear layer is a functional fallback
+        new_head = torch.nn.Linear(in_features, num_labels)
         
         # CRITICAL FIX: Match the model's dtype and device to prevent mat1/mat2 dtype mismatch
         new_head.to(device=model.device, dtype=model.dtype)
@@ -246,10 +323,50 @@ def main():
             optimizer = LOZO(model.parameters(), **opt_kwargs)
             
         optimizer, train_dataloader = accelerator.prepare(optimizer, train_dataloader)
-        if eval_dataloader:
-            eval_dataloader = accelerator.prepare(eval_dataloader)
         if test_dataloader:
             test_dataloader = accelerator.prepare(test_dataloader)
+            
+        # Scheduler setup (Optional)
+        lr_scheduler = None
+        if 'lr_scheduler' in train_config:
+            scheduler_config = train_config.get('lr_scheduler', {})
+            scheduler_type = scheduler_config.get('type', 'linear')
+            warmup_ratio = scheduler_config.get('warmup_ratio', 0.0)
+            warmup_steps = scheduler_config.get('warmup_steps', 0)
+            start_lr = scheduler_config.get('start_lr', 0.0)
+            
+            if max_tokens is not None:
+                # Estimate steps if max_tokens is used (approximation)
+                avg_tokens_per_batch = 128 
+                num_training_steps = max_tokens // (avg_tokens_per_batch * accelerator.num_processes)
+            else:
+                num_training_steps = len(train_dataloader) * epochs
+            if warmup_steps == 0 and warmup_ratio > 0:
+                num_warmup_steps = int(num_training_steps * warmup_ratio)
+            else:
+                num_warmup_steps = warmup_steps
+    
+            if start_lr > 0:
+                peak_lr = opt_config.get('kwargs', {}).get('lr', 1e-6)
+                import math # Ensure math is available for cosine
+                def lr_lambda(current_step):
+                    if current_step < num_warmup_steps:
+                        return (start_lr + (peak_lr - start_lr) * float(current_step) / float(max(1, num_warmup_steps))) / peak_lr
+                    if scheduler_type == "linear":
+                        return max(0.0, float(num_training_steps - current_step) / float(max(1, num_training_steps - num_warmup_steps)))
+                    elif scheduler_type == "cosine":
+                        progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
+                        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
+                    return 1.0
+                lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+            else:
+                lr_scheduler = get_scheduler(
+                    name=scheduler_type,
+                    optimizer=optimizer,
+                    num_warmup_steps=num_warmup_steps,
+                    num_training_steps=num_training_steps,
+                )
+            lr_scheduler = accelerator.prepare(lr_scheduler)
     else:
         # Standard first-order optimizer
         if hasattr(torch.optim, opt_name):
@@ -263,6 +380,33 @@ def main():
             eval_dataloader = accelerator.prepare(eval_dataloader)
         if test_dataloader:
             test_dataloader = accelerator.prepare(test_dataloader)
+            
+        # Scheduler setup (Optional)
+        lr_scheduler = None
+        if 'lr_scheduler' in train_config:
+            scheduler_config = train_config.get('lr_scheduler', {})
+            scheduler_type = scheduler_config.get('type', 'linear')
+            warmup_ratio = scheduler_config.get('warmup_ratio', 0.0)
+            warmup_steps = scheduler_config.get('warmup_steps', 0)
+            
+            if max_tokens is not None:
+                # Estimate steps if max_tokens is used (approximation)
+                avg_tokens_per_batch = 128 
+                num_training_steps = max_tokens // (avg_tokens_per_batch * accelerator.num_processes)
+            else:
+                num_training_steps = len(train_dataloader) * epochs
+            if warmup_steps == 0 and warmup_ratio > 0:
+                num_warmup_steps = int(num_training_steps * warmup_ratio)
+            else:
+                num_warmup_steps = warmup_steps
+                
+            lr_scheduler = get_scheduler(
+                name=scheduler_type,
+                optimizer=optimizer,
+                num_warmup_steps=num_warmup_steps,
+                num_training_steps=num_training_steps,
+            )
+            lr_scheduler = accelerator.prepare(lr_scheduler)
             
     accelerator.print(f"Starting training for {epochs} epochs using {opt_name} optimizer")
     
@@ -335,6 +479,8 @@ def main():
                 progress_bar.set_description(f"Epoch {epoch+1} Loss: {loss.item():.4f}")
                 train_loss_val = loss.item()
                 
+            if lr_scheduler is not None:
+                lr_scheduler.step()
             step_time = time.time() - step_start_time
             local_bsz = batch["labels"].size(0)
             
@@ -347,6 +493,7 @@ def main():
             
             log_metrics = {
                 "train_loss": train_loss_val,
+                "learning_rate": optimizer.param_groups[0]['lr'],
                 "step_time_sec": step_time,
                 "samples_per_second": samples_per_second,
                 "total_tokens_seen": total_tokens_seen
@@ -386,8 +533,13 @@ def main():
                     
                     predictions = outputs.logits.argmax(dim=-1)
                     
-                    local_correct = (predictions == batch["labels"]).sum().to(accelerator.device)
-                    local_total = torch.tensor(batch["labels"].size(0)).to(accelerator.device)
+                    # Ignore -1 labels for evaluation
+                    valid_mask = batch["labels"] != -1
+                    if valid_mask.sum() == 0:
+                        continue
+                    
+                    local_correct = (predictions[valid_mask] == batch["labels"][valid_mask]).sum().to(accelerator.device)
+                    local_total = valid_mask.sum().to(accelerator.device)
                     
                     batch_correct = accelerator.reduce(local_correct, reduction="sum")
                     batch_total = accelerator.reduce(local_total, reduction="sum")
@@ -456,8 +608,12 @@ def main():
                 
                 predictions = outputs.logits.argmax(dim=-1)
                 
-                local_correct = (predictions == batch["labels"]).sum().to(accelerator.device)
-                local_total = torch.tensor(batch["labels"].size(0)).to(accelerator.device)
+                valid_mask = batch["labels"] != -1
+                if valid_mask.sum() == 0:
+                    continue
+                
+                local_correct = (predictions[valid_mask] == batch["labels"][valid_mask]).sum().to(accelerator.device)
+                local_total = valid_mask.sum().to(accelerator.device)
                 
                 batch_correct = accelerator.reduce(local_correct, reduction="sum")
                 batch_total = accelerator.reduce(local_total, reduction="sum")

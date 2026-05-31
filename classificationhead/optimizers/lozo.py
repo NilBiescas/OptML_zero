@@ -13,6 +13,7 @@ class LOZO(Optimizer):
             raise ValueError("Invalid learning rate: {}".format(lr))
         defaults = dict(lr=lr, eps=eps, r=r, nu=nu, seed=seed)
         super(LOZO, self).__init__(params, defaults)
+        self._generators = {}
 
     @torch.no_grad()
     def step(self, closure):
@@ -38,7 +39,7 @@ class LOZO(Optimizer):
                     continue
                 
                 state = self.state[p]
-                if len(state) == 0:
+                if 'step' not in state:
                     state['step'] = 0
                 
                 # Retrieve the deterministic parameter ID injected by the training loop
@@ -47,13 +48,13 @@ class LOZO(Optimizer):
                 # Deterministic seed combining base seed, parameter ID, and step number
                 # ensures perfect alignment across different GPU processes
                 param_seed = seed + state['step'] + param_id * 1000003
-                if 'generator' not in state:
-                    state['generator'] = torch.Generator(device=p.device)
-                generator = state['generator']
+                if p not in self._generators:
+                    self._generators[p] = torch.Generator(device=p.device)
+                generator = self._generators[p]
                 generator.manual_seed(param_seed)
                 
                 if p.dim() >= 2:
-                    if state['step'] % nu == 0:
+                    if state['step'] % nu == 0 or 'V' not in state:
                         # Resample V_l
                         V_dim = p.numel() // p.size(0)
                         state['V'] = torch.randn(V_dim, r, dtype=p.dtype, device=p.device, generator=generator)
@@ -137,6 +138,7 @@ class LOZOM(Optimizer):
             raise ValueError("Invalid learning rate: {}".format(lr))
         defaults = dict(lr=lr, eps=eps, r=r, nu=nu, beta=beta, seed=seed)
         super(LOZOM, self).__init__(params, defaults)
+        self._generators = {}
 
     @torch.no_grad()
     def step(self, closure):
@@ -162,12 +164,13 @@ class LOZOM(Optimizer):
                     continue
                 
                 state = self.state[p]
-                if len(state) == 0:
+                if 'step' not in state:
                     state['step'] = 0
-                    if p.dim() >= 2:
-                        state['N'] = torch.zeros(p.size(0), r, device=p.device, dtype=p.dtype)
-                    else:
-                        state['N_1d'] = torch.zeros_like(p)
+                
+                if p.dim() >= 2 and 'N' not in state:
+                    state['N'] = torch.zeros(p.size(0), r, device=p.device, dtype=p.dtype)
+                elif p.dim() < 2 and 'N_1d' not in state:
+                    state['N_1d'] = torch.zeros_like(p)
                 
                 # Retrieve the deterministic parameter ID injected by the training loop
                 param_id = getattr(p, 'param_id', 0)
@@ -175,13 +178,13 @@ class LOZOM(Optimizer):
                 # Deterministic seed combining base seed, parameter ID, and step number
                 # ensures perfect alignment across different GPU processes
                 param_seed = seed + state['step'] + param_id * 1000003
-                if 'generator' not in state:
-                    state['generator'] = torch.Generator(device=p.device)
-                generator = state['generator']
+                if p not in self._generators:
+                    self._generators[p] = torch.Generator(device=p.device)
+                generator = self._generators[p]
                 generator.manual_seed(param_seed)
                 
                 if p.dim() >= 2:
-                    if state['step'] % nu == 0:
+                    if state['step'] % nu == 0 or 'V' not in state:
                         V_dim = p.numel() // p.size(0)
                         if 'V' in state:
                             V_old = state['V']

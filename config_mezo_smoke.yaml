@@ -1,0 +1,30 @@
+dataset:
+  name: "mteb/banking77"
+  text_column: "text"
+  label_column: "label"
+
+model:
+  name: "Qwen/Qwen3.5-0.8B"
+  freeze_backbone: false
+
+training:
+  epochs: 3
+  batch_size: 16
+  seed: 42
+
+optimizer:
+  name: "MeZO"
+  kwargs:
+    lr: 2.0e-7
+    eps: 1.0e-3
+    seed: 42
+
+scheduler:
+  type: cosine
+  warmup_steps: 100
+  t_max_epochs: 3
+  eta_min_ratio: 0.1
+
+hub:
+  push_to_hub: false
+  repo_id: null
