@@ -1,0 +1,21 @@
+# SubZero (Yu et al. ICCV 2025). Per-layer orthogonal U,V → perturbation
+# `U Z V^T` in q-dim subspace; variance O(q) not O(d).
+# Implementation: optimizers/subzero.py — see zimingyy/SubZero (port from
+# `nil_branch:SubZero/large_models/`).
+owner: nil
+
+model:
+  name: Qwen/Qwen3.5-0.8B
+
+training:
+  seed: 42
+  batch_size: 16
+  max_steps: 20000
+  eval_steps: 500
+  num_train: 1000
+  num_eval: 1000
+
+optimizer:
+  name: SubZero
+  kwargs:
+    # TODO: fill in hyperparameters from the paper / reference code

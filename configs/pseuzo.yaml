@@ -1,0 +1,21 @@
+# PseuZO (NeurIPS 2025). Pseudo-zeroth-order: Jacobian estimation via model
+# output differentiation + EMA variance reduction.
+# Implementation: optimizers/pseuzo.py — see YangBigMn/PseuZO (port from
+# `nil_branch:PseuZO/pzo_trainer.py`).
+owner: nil
+
+model:
+  name: Qwen/Qwen3.5-0.8B
+
+training:
+  seed: 42
+  batch_size: 16
+  max_steps: 20000
+  eval_steps: 500
+  num_train: 1000
+  num_eval: 1000
+
+optimizer:
+  name: PseuZO
+  kwargs:
+    # TODO: fill in hyperparameters from the paper / reference code

@@ -36,15 +36,34 @@ pip install -r requirements.txt
 export WANDB_API_KEY=...
 export HF_TOKEN=...
 
-# Pick optimizer × task:
-python train.py --config configs/mezo.yaml         --task multirc --owner maria
-python train.py --config configs/sparse_mezo.yaml  --task copa    --owner maria
-python train.py --config configs/lozo.yaml         --task multirc --owner cheng
-python train.py --config configs/dizo.yaml         --task multirc --owner nil
-python train.py --config configs/hizoo.yaml        --task copa    --owner maria
+# 11 methods × 2 tasks = 22 runs total. Owner is read from each YAML by default;
+# override with --owner or RUN_OWNER if needed.
+python train.py --config configs/mezo.yaml        --task multirc
+python train.py --config configs/sparse_mezo.yaml --task copa
+python train.py --config configs/hizoo.yaml       --task multirc
+python train.py --config configs/quzo.yaml        --task copa
+python train.py --config configs/lozo.yaml        --task multirc
+python train.py --config configs/dizo.yaml        --task copa
+python train.py --config configs/zo_muon.yaml     --task multirc
+python train.py --config configs/conmezo.yaml     --task copa
+python train.py --config configs/fzoo.yaml        --task multirc
+python train.py --config configs/pseuzo.yaml      --task copa
+python train.py --config configs/subzero.yaml     --task multirc
 ```
 
-10 combinations total (5 optimizers × 2 tasks) → 10 WandB runs.
+| Method      | Owner | Class        | Module                       |
+|---|---|---|---|
+| MeZO        | cheng | `MeZO`       | `optimizers/mezo.py`         |
+| Sparse-MeZO | maria | `SparseMeZO` | `optimizers/sparse_mezo.py`  |
+| HiZOO       | maria | `HiZOO`      | `optimizers/hizoo.py`        |
+| QuZO        | maria | `QuZO`       | `optimizers/quzo.py`         |
+| LOZO        | nil   | `LOZO`       | `optimizers/lozo.py`         |
+| DiZO        | cheng | `DiZO`       | `optimizers/dizo.py`         |
+| ZO-Muon     | cheng | `ZOMuon`     | `optimizers/zo_muon.py`      |
+| ConMeZO     | cheng | `ConMeZO`    | `optimizers/conmezo.py`      |
+| FZOO        | cheng | `FZOO`       | `optimizers/fzoo.py`         |
+| PseuZO      | nil   | `PseuZO`     | `optimizers/pseuzo.py`       |
+| SubZero     | nil   | `SubZero`    | `optimizers/subzero.py`      |
 
 ## Adding a new SuperGLUE task
 

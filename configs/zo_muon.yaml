@@ -1,5 +1,6 @@
-# DiZO (Tan et al. NeurIPS 2025). Divergence-driven layer adaptation.
-# Implementation: optimizers/dizo.py — see Skilteee/DiZO reference.
+# ZO-Muon (Lang et al. 2026). Subspace random-gradient estimator + Muon
+# gradient orthogonalization.
+# Implementation: optimizers/zo_muon.py — see Cheng's `chenghengli` branch.
 owner: cheng
 
 model:
@@ -14,6 +15,6 @@ training:
   num_eval: 1000
 
 optimizer:
-  name: DiZO
+  name: ZOMuon
   kwargs:
     # TODO: fill in hyperparameters from the paper / reference code

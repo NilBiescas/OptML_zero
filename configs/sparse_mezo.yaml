@@ -1,5 +1,5 @@
-# Sparse-MeZO (Liu et al. 2024). Paper "sparsity 0.80" = our `sparsity 0.20`
-# (we define sparsity as fraction PERTURBED; vanilla MeZO is 1.0).
+# Sparse-MeZO (Liu et al. 2024). Magnitude-sparse perturbation mask.
+# Implementation: optimizers/sparse_mezo.py — see NUS-HPC-AI-Lab/SparseMeZO.
 owner: maria
 
 model:
@@ -16,9 +16,4 @@ training:
 optimizer:
   name: SparseMeZO
   kwargs:
-    lr: 1.0e-6
-    eps: 1.0e-3
-    sparsity: 0.20
-    mask_mode: small_magnitude   # small_magnitude | large_magnitude | random
-    mask_refresh: 1              # paper uses dynamic mask (recompute every step)
-    seed: 42
+    # TODO: fill in hyperparameters from the paper / reference code

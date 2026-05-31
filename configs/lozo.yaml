@@ -1,5 +1,6 @@
-# LOZO (Chen et al. ICLR 2025). Low-rank perturbation U V^T, V resampled every nu steps.
-owner: maria
+# LOZO (Chen et al. ICLR 2025). Low-rank perturbation U V^T, lazy V resample.
+# Implementation: optimizers/lozo.py — see upstream LOZO/large_models reference.
+owner: nil
 
 model:
   name: Qwen/Qwen3.5-0.8B
@@ -15,8 +16,4 @@ training:
 optimizer:
   name: LOZO
   kwargs:
-    lr: 1.0e-5
-    eps: 1.0e-3
-    r: 4
-    nu: 50
-    seed: 42
+    # TODO: fill in hyperparameters from the paper / reference code

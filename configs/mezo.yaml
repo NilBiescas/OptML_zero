@@ -1,5 +1,6 @@
-# Vanilla MeZO baseline. Princeton's recipe: lr=1e-7, eps=1e-3, 20k steps.
-owner: maria   # override with --owner <name> or RUN_OWNER env var
+# MeZO (Malladi et al. NeurIPS 2023). Vanilla SPSA baseline.
+# Implementation: optimizers/mezo.py — see Cheng's `chenghengli` branch for reference.
+owner: cheng
 
 model:
   name: Qwen/Qwen3.5-0.8B
@@ -9,12 +10,10 @@ training:
   batch_size: 16
   max_steps: 20000
   eval_steps: 500
-  num_train: 1000           # MeZO paper convention
+  num_train: 1000
   num_eval: 1000
 
 optimizer:
   name: MeZO
   kwargs:
-    lr: 1.0e-7
-    eps: 1.0e-3
-    seed: 42
+    # TODO: fill in hyperparameters from the paper / reference code

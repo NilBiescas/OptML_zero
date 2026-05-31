@@ -40,13 +40,17 @@ from tasks import load_task
 # lazily import only the one selected by the YAML, so missing modules for
 # methods you're not running don't break anything.
 OPTIMIZER_MODULES = {
-    "MeZO":       "mezo",
-    "SparseMeZO": "sparse_mezo",
-    "LOZO":       "lozo",
-    "LOZOM":      "lozo",
-    "DiZO":       "dizo",
-    "HiZOO":      "hizoo",
-    "QuZO":       "quzo",
+    "MeZO":       "mezo",         # Cheng
+    "SparseMeZO": "sparse_mezo",  # Maria
+    "HiZOO":      "hizoo",        # Maria
+    "QuZO":       "quzo",         # Maria
+    "LOZO":       "lozo",         # Nil
+    "DiZO":       "dizo",         # Cheng
+    "ZOMuon":     "zo_muon",      # Cheng
+    "ConMeZO":    "conmezo",      # Cheng
+    "FZOO":       "fzoo",         # Cheng
+    "PseuZO":     "pseuzo",       # Nil
+    "SubZero":    "subzero",      # Nil
 }
 
 
