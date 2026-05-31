@@ -57,6 +57,15 @@ DTYPE_ALIASES = {
     "fp32":     torch.float32,
 }
 
+# HF Hub username per team-owner. Used to derive a default `hub.repo_id` when
+# push_to_hub is on but the YAML doesn't specify one. Each person pushes to
+# their own repo so no cross-account collaborator setup is required.
+OWNER_HF_HANDLE = {
+    "maria": "mpilligua",
+    "nil":   "NilBiescas",
+    "cheng": "chenghengli",
+}
+
 # Map optimizer class name -> module filename under optimizers/.
 # train.py lazily imports only the one selected by the YAML, so missing
 # modules for methods you're not running don't break anything.
@@ -262,6 +271,31 @@ def _hub_push_folder(folder: Path, repo_id: str, sub_path: str, commit_message: 
         return False
 
 
+def _assert_hub_writable(repo_id: str) -> None:
+    """Fail fast at startup if the HF token can't push to `repo_id`.
+
+    `push_to_hub` jobs are typically multi-hour runs; we'd rather error in the
+    first second than after 4h of compute. Tries `create_repo(exist_ok=True)`
+    which exercises the same auth path the final push will use.
+    """
+    if not os.environ.get("HF_TOKEN") and not os.environ.get("HUGGINGFACE_HUB_TOKEN"):
+        raise RuntimeError(
+            "hub.push_to_hub: true but no HF_TOKEN / HUGGINGFACE_HUB_TOKEN in env. "
+            "Export a token with write scope on the target repo before launching."
+        )
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi()
+        who = api.whoami()
+        api.create_repo(repo_id=repo_id, exist_ok=True)
+        print(f"[hub] verified write access to {repo_id} as user={who.get('name')!r}")
+    except Exception as e:
+        raise RuntimeError(
+            f"hub.push_to_hub: true but cannot write to {repo_id!r}: {e}\n"
+            "Check that HF_TOKEN has write scope and that you have access to the repo."
+        )
+
+
 # --------------------------------------------------------------------------
 # Main
 # --------------------------------------------------------------------------
@@ -287,17 +321,31 @@ def main():
     num_train  = cfg.get("training", {}).get("num_train", 1000)
     num_eval   = cfg.get("training", {}).get("num_eval", 1000)
     model_name = cfg.get("model", {}).get("name", "Qwen/Qwen3.5-0.8B")
-    dtype_str  = cfg.get("model", {}).get("dtype", "float16")
+    # Default dtype is bfloat16: more stable than fp16 for long-horizon ZO
+    # runs (RCP1 hit fp16 underflow during Sparse-MeZO replication on WiC).
+    dtype_str  = cfg.get("model", {}).get("dtype", "bfloat16")
     if dtype_str not in DTYPE_ALIASES:
         raise ValueError(f"model.dtype must be one of {list(DTYPE_ALIASES)} (got {dtype_str!r})")
     model_dtype = DTYPE_ALIASES[dtype_str]
 
-    # ---- HF Hub push (optional) ------------------------------------------
+    # ---- HF Hub push (on by default) -------------------------------------
+    # Best + last ckpts are pushed once, at end of training. Each owner pushes
+    # to their own repo to avoid cross-account collaborator setup. Override
+    # the derived repo_id with `hub.repo_id: <handle>/<repo>` in the YAML, or
+    # disable entirely with `hub.push_to_hub: false`.
     hub_cfg     = cfg.get("hub", {}) or {}
-    push_to_hub = bool(hub_cfg.get("push_to_hub", False))
+    push_to_hub = bool(hub_cfg.get("push_to_hub", True))
     hub_repo_id = hub_cfg.get("repo_id")
     if push_to_hub and not hub_repo_id:
-        raise ValueError("hub.push_to_hub: true requires hub.repo_id in the YAML")
+        handle = OWNER_HF_HANDLE.get(owner)
+        if not handle:
+            raise ValueError(
+                f"hub.push_to_hub on but no `hub.repo_id` set and no default "
+                f"HF handle known for owner={owner!r}. Set hub.repo_id in the YAML "
+                "or disable with hub.push_to_hub: false."
+            )
+        hub_repo_id = f"{handle}/zo-comparison-qwen"
+        print(f"[hub] no repo_id in YAML; defaulting to {hub_repo_id}")
 
     # ---- Resume meta (loaded early so global_step / best / total_forwards
     # ----   are seeded from disk before training starts) ------------------
@@ -319,21 +367,45 @@ def main():
     set_seed(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # ---- WandB: run name + grouping + tags --------------------------------
-    stamp    = datetime.now(timezone.utc).strftime("%m_%d_%H_%M_%S")
-    run_name = f"{owner}-{opt_name}-{args.task}-{stamp}"
-    wandb.init(
-        project="Zero-Order-Opt",
-        name=run_name,
-        group=args.task,                             # group all multirc / all copa together
-        tags=[owner, opt_name, args.task],           # filter in the dashboard
-        config={**cfg, "task": args.task, "owner": owner,
-                "_resolved_seed": seed,
-                "_resolved_dtype": dtype_str,
-                "_resumed_from":   args.resume_from,
-                "_hub_push":       push_to_hub,
-                "_hub_repo_id":    hub_repo_id},
-    )
+    # ---- Fail fast on HF auth before doing anything expensive ----
+    if push_to_hub:
+        _assert_hub_writable(hub_repo_id)
+
+    # ---- WandB: resume the SAME run if we're picking up a prior ckpt ------
+    resumed_run_id   = (resume_meta or {}).get("wandb_run_id")
+    resumed_run_name = (resume_meta or {}).get("run_name")
+    if resumed_run_id and resumed_run_name:
+        run_name = resumed_run_name
+        wandb.init(
+            project="Zero-Order-Opt",
+            id=resumed_run_id,
+            resume="allow",
+            name=run_name,
+            group=args.task,
+            tags=[owner, opt_name, args.task],
+            config={**cfg, "task": args.task, "owner": owner,
+                    "_resolved_seed": seed,
+                    "_resolved_dtype": dtype_str,
+                    "_resumed_from":   args.resume_from,
+                    "_hub_push":       push_to_hub,
+                    "_hub_repo_id":    hub_repo_id},
+        )
+        print(f"[Resume] continuing WandB run id={resumed_run_id} name={run_name}")
+    else:
+        stamp    = datetime.now(timezone.utc).strftime("%m_%d_%H_%M_%S")
+        run_name = f"{owner}-{opt_name}-{args.task}-{stamp}"
+        wandb.init(
+            project="Zero-Order-Opt",
+            name=run_name,
+            group=args.task,                          # group all multirc / all copa together
+            tags=[owner, opt_name, args.task],        # filter in the dashboard
+            config={**cfg, "task": args.task, "owner": owner,
+                    "_resolved_seed": seed,
+                    "_resolved_dtype": dtype_str,
+                    "_resumed_from":   args.resume_from,
+                    "_hub_push":       push_to_hub,
+                    "_hub_repo_id":    hub_repo_id},
+        )
 
     # ---- Load task data ---------------------------------------------------
     spec, ds = load_task(args.task, num_train=num_train, seed=seed)
@@ -555,6 +627,7 @@ def main():
                     "total_steps":    global_step,
                     "total_forwards": total_forwards,
                     "run_name":       run_name,
+                    "wandb_run_id":   wandb.run.id,
                     "task":           args.task,
                     "opt_name":       opt_name,
                     "owner":          owner,
@@ -572,18 +645,6 @@ def main():
                 print(f"  [best] new best logit_acc={best['logit_accuracy']:.4f} "
                       f"(saved -> {best_dir})")
 
-                # Optional HF Hub push of the best checkpoint.
-                if push_to_hub:
-                    ok = _hub_push_folder(
-                        folder=best_dir,
-                        repo_id=hub_repo_id,
-                        sub_path=f"{run_name}/best",
-                        commit_message=(f"best ckpt {run_name} step={global_step} "
-                                        f"logit_acc={best['logit_accuracy']:.4f}"),
-                    )
-                    if ok:
-                        print(f"  [hub] pushed best ckpt to {hub_repo_id}/{run_name}/best")
-
             model.eval()   # keep eval mode for the next ZO step
 
     # ---- Save LAST checkpoint -----------------------------------------------
@@ -594,6 +655,7 @@ def main():
         "nan_aborted":    nan_seen,
         "best":           dict(best),
         "run_name":       run_name,
+        "wandb_run_id":   wandb.run.id,
         "task":           args.task,
         "opt_name":       opt_name,
         "owner":          owner,
@@ -602,8 +664,20 @@ def main():
     save_checkpoint(model, tokenizer, optimizer, last_dir,
                     final_meta, source_cfg_path=args.config)
 
-    # Optional HF Hub push of the last checkpoint too (one final upload).
+    # ---- HF Hub: push best + last ONCE, only at end of training ----
+    # Doing this here (instead of on every new best) means the run isn't
+    # blocked by Hub network latency mid-training and we only pay one push
+    # round-trip per checkpoint. The startup assertion already proved the
+    # token is writable, so this is unlikely to fail.
     if push_to_hub:
+        if best_dir.exists():
+            _hub_push_folder(
+                folder=best_dir,
+                repo_id=hub_repo_id,
+                sub_path=f"{run_name}/best",
+                commit_message=(f"best ckpt {run_name} step={best['at_step']} "
+                                f"logit_acc={best['logit_accuracy']:.4f}"),
+            )
         _hub_push_folder(
             folder=last_dir,
             repo_id=hub_repo_id,

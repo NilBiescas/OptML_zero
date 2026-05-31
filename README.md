@@ -9,7 +9,7 @@ apples-to-apples cross-method numbers in one WandB project.
 
 | Item        | Value |
 |---|---|
-| Model       | `Qwen/Qwen3.5-0.8B` (fp16 default; `model.dtype: bfloat16` or `float32` in YAML) |
+| Model       | `Qwen/Qwen3.5-0.8B` (bf16 default; `model.dtype: float16` or `float32` in YAML) |
 | Tasks       | SuperGLUE **MultiRC** and **COPA** (more in `tasks.py:TASKS`) |
 | Train ex.   | 1000 (MeZO paper convention) |
 | Steps       | 20 000 |
@@ -65,21 +65,30 @@ python train.py --config configs/subzero.yaml     --task multirc
 | PseuZO      | nil   | `PseuZO`     | `optimizers/pseuzo.py`       |
 | SubZero     | nil   | `SubZero`    | `optimizers/subzero.py`      |
 
-## Optional YAML fields
+## Optional YAML fields (defaults shown)
 
 ```yaml
 model:
   name:           Qwen/Qwen3.5-0.8B
-  dtype:          float16       # float16 | bfloat16 | float32 (default float16)
-  load_in_8bit:   false         # QuZO uses this — bitsandbytes 8-bit base
+  dtype:          bfloat16      # bfloat16 (default) | float16 | float32
+  load_in_8bit:   false         # QuZO sets this — bitsandbytes 8-bit base
 
 hub:
-  push_to_hub:    false         # if true, best + last ckpts pushed to HF Hub
-  repo_id:        ""            # e.g. "nilbiescas3/zo-comparison"
+  push_to_hub:    true          # best + last ckpts pushed at END of training
+  repo_id:        ""            # if empty, derived as <handle>/zo-comparison-qwen
+                                #   maria → mpilligua, nil → NilBiescas,
+                                #   cheng → chenghengli
 ```
 
-`bfloat16` is worth flipping on for any method that hit fp16 underflow during
-replication (Sparse-MeZO did — see RCP1's notes on issue #2).
+Defaults are tuned for the team study — bf16 (stable for long ZO horizons,
+avoids the fp16 underflow Sparse-MeZO hit on WiC) and Hub push on (so the
+weights end up somewhere shareable). To disable Hub push for a local
+sanity-check run, set `hub.push_to_hub: false` in the YAML or override on
+the command line via a temp config copy.
+
+The startup assertion checks that `HF_TOKEN` (or `HUGGINGFACE_HUB_TOKEN`) is
+in the env AND has write access to the target repo before anything else
+runs — so an auth misconfig aborts in the first second, not after 4 h.
 
 ## Resuming a crashed run
 
