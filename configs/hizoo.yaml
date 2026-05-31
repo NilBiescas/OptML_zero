@@ -1,9 +1,9 @@
 # HiZOO (Zhao et al. ICLR 2025). Diagonal Hessian preconditioner, still pure ZO.
-# Memory caveat: O(d) extra state — at 0.5B fp16 that's ~1 GB extra. Fine on H100.
+# Memory caveat: O(d) extra state — at 0.8B fp16 that's ~1.6 GB extra. Fine on H100.
 owner: maria
 
 model:
-  name: Qwen/Qwen2.5-0.5B
+  name: Qwen/Qwen3.5-0.8B
 
 training:
   seed: 42

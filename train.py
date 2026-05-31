@@ -157,7 +157,7 @@ def main():
     eval_steps = cfg.get("training", {}).get("eval_steps", 500)
     num_train  = cfg.get("training", {}).get("num_train", 1000)
     num_eval   = cfg.get("training", {}).get("num_eval", 1000)
-    model_name = cfg.get("model", {}).get("name", "Qwen/Qwen2.5-0.5B")
+    model_name = cfg.get("model", {}).get("name", "Qwen/Qwen3.5-0.8B")
 
     set_seed(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")

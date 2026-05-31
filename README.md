@@ -9,7 +9,7 @@ apples-to-apples cross-method numbers in one WandB project.
 
 | Item        | Value |
 |---|---|
-| Model       | `Qwen/Qwen2.5-0.5B` (fp16 — ZO does no backprop) |
+| Model       | `Qwen/Qwen3.5-0.8B` (fp16 — ZO does no backprop) |
 | Tasks       | SuperGLUE **MultiRC** and **COPA** (more in `tasks.py:TASKS`) |
 | Train ex.   | 1000 (MeZO paper convention) |
 | Steps       | 20 000 |

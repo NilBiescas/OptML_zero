@@ -2,7 +2,7 @@
 owner: maria   # override with --owner <name> or RUN_OWNER env var
 
 model:
-  name: Qwen/Qwen2.5-0.5B   # ~0.5B; closest publicly available "Qwen 0.8B" tier
+  name: Qwen/Qwen3.5-0.8B
 
 training:
   seed: 42
