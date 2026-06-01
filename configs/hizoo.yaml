@@ -3,7 +3,8 @@
 owner: maria
 
 model:
-  name: Qwen/Qwen3.5-0.8B
+  name: Qwen/Qwen2.5-0.5B
+  dtype: float16
 
 training:
   seed: 42
@@ -16,4 +17,12 @@ training:
 optimizer:
   name: HiZOO
   kwargs:
-    # TODO: fill in hyperparameters from the paper / reference code
+    lr: 1e-6                       # paper default (OPT-13B / RTE Table 2)
+    eps: 1e-3                      # perturbation scale ε, paper default
+    hessian_smooth_type: constant1e-8  # α schedule; paper best result
+    weight_decay: 0.0
+    total_steps: 20000
+
+hub:
+  push_to_hub: true
+  repo_id: mpilligua/zo-comparison-qwen

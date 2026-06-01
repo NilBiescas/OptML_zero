@@ -1,0 +1,26 @@
+# Smoke test config: 50 steps to verify memory, fwds/step, WandB
+owner: maria
+
+model:
+  name: Qwen/Qwen2.5-0.5B
+  dtype: float16
+
+training:
+  seed: 42
+  batch_size: 16
+  max_steps: 50
+  eval_steps: 25
+  num_train: 1000
+  num_eval: 200
+
+optimizer:
+  name: HiZOO
+  kwargs:
+    lr: 1e-6
+    eps: 1e-3
+    hessian_smooth_type: constant1e-8
+    weight_decay: 0.0
+    total_steps: 50
+
+hub:
+  push_to_hub: false
