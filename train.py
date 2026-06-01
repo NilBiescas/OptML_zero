@@ -585,6 +585,10 @@ def main():
             "train/loss":               loss_val,
             "train/step_time_sec":      dt,
             "train/avg_step_time_sec":  sum(step_times) / len(step_times),
+            # Cumulative TRAINING-ONLY wall time: sum of per-step optimizer.step
+            # durations. Excludes eval, checkpointing, model download, and any
+            # other artifacts — this is the fair "time spent training" metric.
+            "train/cumulative_train_time_sec": sum(step_times),
             "train/step":               global_step,
             "train/epoch":              global_step / steps_per_epoch,
             "train/datapoints_seen":    global_step * batch_size,
@@ -699,6 +703,10 @@ def main():
         "final/total_forwards":    total_forwards,
         "final/avg_step_time_sec": (sum(step_times) / len(step_times)) if step_times else 0.0,
         "final/total_time_sec":    total_time,
+        # Training-only wall time (sum of optimizer.step durations) — excludes
+        # eval/checkpoint/download. Use THIS for cross-method time comparison,
+        # not total_time_sec (which includes eval + the one-time model load).
+        "final/train_only_time_sec": sum(step_times),
         "final/nan_aborted":       nan_seen,
     }
     if torch.cuda.is_available():
@@ -728,7 +736,8 @@ def main():
         print(f"  FINAL  logit_acc={last_eval['eval/logit_accuracy']:.4f}  "
               f"token_acc={last_eval['eval/token_accuracy']:.4f}")
     print(f"  TOTAL  {global_step} steps / {total_forwards} forwards / "
-          f"{total_time:.1f}s wall / peak {summary.get('final/peak_mem_MB', 0):.0f}MB")
+          f"{sum(step_times):.1f}s train-only / {total_time:.1f}s wall / "
+          f"peak {summary.get('final/peak_mem_MB', 0):.0f}MB")
     if nan_seen:
         print("  WARN   run aborted on non-finite loss.")
     print(f"  CKPTS  best -> {best_dir}")
