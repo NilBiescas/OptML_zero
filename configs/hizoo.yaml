@@ -17,11 +17,13 @@ training:
 optimizer:
   name: HiZOO
   kwargs:
-    lr: 1e-6                       # paper default (OPT-13B / RTE Table 2)
+    lr: 1e-7                       # scaled down 10x from paper (OPT-13B 1e-6); 0.5B model needs smaller LR
     eps: 1e-3                      # perturbation scale ε, paper default
     hessian_smooth_type: constant1e-8  # α schedule; paper best result
     weight_decay: 0.0
     total_steps: 20000
+    lr_scheduler: cosine   # decay from lr to lr*lr_min_ratio over training
+    lr_min_ratio: 0.1      # final LR = 1e-8
 
 hub:
   push_to_hub: true

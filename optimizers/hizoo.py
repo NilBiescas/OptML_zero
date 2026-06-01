@@ -135,12 +135,16 @@ class HiZOO(Optimizer):
         hessian_smooth_type: str = "constant1e-8",
         weight_decay: float = 0.0,
         total_steps: int = 20000,
+        lr_scheduler: str = "cosine",   # "constant" | "cosine" | "linear"
+        lr_min_ratio: float = 0.1,      # final LR = lr * lr_min_ratio
     ):
         # YAML may deliver numeric kwargs as strings (e.g. lr: 1e-6 → '1e-6')
         defaults = dict(lr=float(lr), eps=float(eps), weight_decay=float(weight_decay))
         super().__init__(params, defaults)
         self.hessian_smooth_type = str(hessian_smooth_type)
         self.total_steps         = int(total_steps)
+        self.lr_scheduler        = str(lr_scheduler)
+        self.lr_min_ratio        = float(lr_min_ratio)
         self._step               = 0
         self.last_metrics: dict  = {}
 
@@ -216,9 +220,19 @@ class HiZOO(Optimizer):
         assert closure is not None, "HiZOO requires a closure"
 
         group        = self.param_groups[0]
-        zo_lr        = group["lr"]
+        base_lr      = group["lr"]
         zo_eps       = group["eps"]
         weight_decay = group["weight_decay"]
+
+        # LR schedule (applied on top of base_lr, entirely inside the optimizer)
+        t = self._step / max(1, self.total_steps)
+        if self.lr_scheduler == "cosine":
+            zo_lr = base_lr * (self.lr_min_ratio +
+                    (1 - self.lr_min_ratio) * 0.5 * (1 + math.cos(math.pi * t)))
+        elif self.lr_scheduler == "linear":
+            zo_lr = base_lr * (1 - (1 - self.lr_min_ratio) * t)
+        else:  # "constant"
+            zo_lr = base_lr
 
         # Reference evaluates Hessian_smooth once per epoch at epoch start;
         # for constant schedules (paper default) this is identical to per-step.
@@ -291,6 +305,7 @@ class HiZOO(Optimizer):
             "loss2":          float(loss2.item()),
             "hessian_smooth": Hessian_smooth,
             "curvature_est":  float((loss1 + loss2 - 2 * loss_original).abs().item()),
+            "lr_effective":   zo_lr,
         }
 
         return loss_original
