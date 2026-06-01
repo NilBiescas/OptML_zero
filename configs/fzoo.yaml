@@ -14,10 +14,10 @@ model:
 training:
   seed: 42
   batch_size: 16
-  max_steps: 6000
+  max_steps: 1500
   eval_steps: 500
   num_train: 1000
-  num_eval: 1000
+  num_eval: 200
 
 optimizer:
   name: FZOO
