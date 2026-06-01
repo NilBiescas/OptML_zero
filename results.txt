@@ -1,0 +1,22 @@
+LOZO
+Ppaer: 73.4 (4.0) 
+
+Mean= (0.733+0.704+0.679+0.651+0.614​)/5 = 0.6762
+
+PseuZO
+RTE
+'accuracy': np.float64(0.5740072202166066), 
+'val_accuracy': np.float64(0.5740072202166066), 
+'dev_accuracy': np.float64(0.55078125), 
+'dev_val_accuracy': np.float64(0.55078125)
+
+
+ SST2
+'accuracy': np.float64(0.890625), 
+'val_accuracy': np.float64(0.890625), 
+'dev_accuracy': np.float64(0.890625), 
+'dev_val_accuracy': np.float64(0.890625)}
+
+SubZero
+
+
