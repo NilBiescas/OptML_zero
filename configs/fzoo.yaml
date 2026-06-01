@@ -1,10 +1,15 @@
 # FZOO (Zhang et al. ICML 2025). Batched one-sided estimate + Rademacher
 # perturbations + std-adaptive step size.
-# Implementation: optimizers/fzoo.py — see Cheng's `chenghengli` branch.
+# Implementation: optimizers/fzoo.py — ported from Cheng's `chenghengli`
+# branch (validated on OPT-1.3B/SST-2).
 owner: cheng
 
 model:
   name: Qwen/Qwen3.5-0.8B
+  # float32: FZOO's effective step is lr_eff = lr / max(sigma_hat, sigma_floor);
+  # with lr=1e-5 and the floor this lands around 1e-3, but the per-element
+  # update c_k*z_k is still small — fp32 avoids bf16 rounding of the sum.
+  dtype: float32
 
 training:
   seed: 42
@@ -17,4 +22,14 @@ training:
 optimizer:
   name: FZOO
   kwargs:
-    # TODO: fill in hyperparameters from the paper / reference code
+    lr: 1.0e-5
+    eps: 1.0e-3
+    Nq: 8
+    # sigma_floor=1e-2 caps lr_eff at lr/1e-2 = 1e-3. A smaller floor (1e-8)
+    # let lr_eff explode to ~100 at step 0 (flat loss surface -> sigma_hat~0)
+    # and corrupted the pretrained weights; 1e-2 trains stably.
+    sigma_floor: 1.0e-2
+    seed: 42
+
+hub:
+  push_to_hub: false   # WandB-only run; no HF checkpoint push (avoids HF-auth fast-fail)

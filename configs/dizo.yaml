@@ -1,9 +1,15 @@
 # DiZO (Tan et al. NeurIPS 2025). Divergence-driven layer adaptation.
-# Implementation: optimizers/dizo.py — see Skilteee/DiZO reference.
+# Implementation: optimizers/dizo.py — ported from Cheng's `chenghengli` branch
+# (Skilteee/DiZO reference). Phase 1 is MeZO-style full-rank ZO; every `kappa`
+# steps Phase 2 ZO-optimizes a per-layer scalar gamma for Q/V attention weights
+# and rescales each layer's divergence from the pretrained anchor. Q/V layers
+# are found via p.param_name (the harness injects param_name — train.py:449).
 owner: cheng
 
 model:
   name: Qwen/Qwen3.5-0.8B
+  # float32: main ZO lr=1e-7 (see ConMeZO note) — bf16 would round the step away.
+  dtype: float32
 
 training:
   seed: 42
@@ -16,4 +22,14 @@ training:
 optimizer:
   name: DiZO
   kwargs:
-    # TODO: fill in hyperparameters from the paper / reference code
+    lr: 1.0e-7       # main ZO learning rate (full-param)
+    eps: 1.0e-3      # main perturbation scale
+    eps_proj: 1.0e-1 # perturbation on the per-layer gamma ZO sub-problem
+    kappa: 100       # projection update interval (steps)
+    tau: 0.1         # clip gamma/||delta|| to [1-tau, 1+tau]
+    j_proj: 5        # inner ZO iterations per projection update
+    lr_proj: 1.0e-3  # learning rate for the per-layer gamma (~1, not weight scale)
+    seed: 42
+
+hub:
+  push_to_hub: false   # WandB-only run; no HF checkpoint push (avoids HF-auth fast-fail)
