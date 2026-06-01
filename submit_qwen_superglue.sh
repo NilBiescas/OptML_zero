@@ -24,7 +24,11 @@ TASK="${TASK:-copa}"
 GPUS=1
 NODE="${NODE:-h100}"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
-JOB_NAME="chengheng-${METHOD}-${TASK}-${TIMESTAMP}"
+# runai job names must be alphanumeric + '-' only: sanitize underscores
+# (e.g. config stem "zo_muon" -> name token "zo-muon"). CONFIG_FILE still uses
+# the original METHOD so it resolves configs/zo_muon.yaml.
+METHOD_SAFE="${METHOD//_/-}"
+JOB_NAME="chengheng-${METHOD_SAFE}-${TASK}-${TIMESTAMP}"
 PROJECT="dlab-${GASPAR}"
 IMAGE="pytorch/pytorch:2.6.0-cuda12.6-cudnn9-devel"
 BRANCH="${BRANCH:-cheng-zo-optimizers}"
