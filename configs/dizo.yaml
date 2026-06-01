@@ -14,7 +14,7 @@ model:
 training:
   seed: 42
   batch_size: 16
-  max_steps: 20000
+  max_steps: 6000
   eval_steps: 500
   num_train: 1000
   num_eval: 1000
