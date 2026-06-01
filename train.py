@@ -83,10 +83,20 @@ OPTIMIZER_MODULES = {
     "SubZero":    "subzero",      # Nil
 }
 
+# First-order optimizers — taken straight from torch.optim. Routed through a
+# separate training loop (backprop instead of closure-based ZO). Useful as the
+# upper-bound baseline for the comparison plot.
+FIRST_ORDER_OPTIMIZERS = {"Adam", "AdamW", "SGD"}
+
 
 def load_optimizer_cls(name: str):
+    if name in FIRST_ORDER_OPTIMIZERS:
+        return getattr(torch.optim, name)
     if name not in OPTIMIZER_MODULES:
-        raise ValueError(f"Unknown optimizer {name!r}; registered: {list(OPTIMIZER_MODULES)}")
+        raise ValueError(
+            f"Unknown optimizer {name!r}; ZO methods: {list(OPTIMIZER_MODULES)}, "
+            f"FO methods: {sorted(FIRST_ORDER_OPTIMIZERS)}"
+        )
     mod = importlib.import_module(f"optimizers.{OPTIMIZER_MODULES[name]}")
     if not hasattr(mod, name):
         raise ImportError(
@@ -313,6 +323,7 @@ def main():
     opt_name   = cfg["optimizer"]["name"]
     opt_kwargs = cfg["optimizer"].get("kwargs", {}) or {}
     opt_cls    = load_optimizer_cls(opt_name)
+    is_first_order = opt_name in FIRST_ORDER_OPTIMIZERS
 
     seed       = cfg.get("training", {}).get("seed", 42)
     batch_size = cfg.get("training", {}).get("batch_size", 16)
@@ -435,7 +446,12 @@ def main():
             weights_src, trust_remote_code=True, torch_dtype=model_dtype,
         ).to(device)
     model.config.pad_token_id = tokenizer.pad_token_id
-    model.eval()  # ZO assumes no dropout noise in the gradient estimate
+    # ZO assumes no dropout noise in the gradient estimate; FO trains with
+    # dropout enabled like a normal first-order fine-tune.
+    if is_first_order:
+        model.train()
+    else:
+        model.eval()
 
     # Param-id + param-name injection.
     # - param_id keeps per-param RNG seeds in lock-step across ranks (LOZO,
@@ -457,8 +473,12 @@ def main():
     )
 
     # ---- Optimizer --------------------------------------------------------
-    optimizer = opt_cls(model.parameters(), **opt_kwargs)
-    print(f"[Opt] {opt_name}({opt_kwargs})")
+    optimizer = opt_cls(
+        (p for p in model.parameters() if p.requires_grad),
+        **opt_kwargs,
+    )
+    print(f"[Opt] {opt_name}({opt_kwargs})  "
+          f"{'(first-order, backprop)' if is_first_order else '(zeroth-order, closure)'}")
 
     # ---- Resume optimizer state (best-effort) ----------------------------
     if args.resume_from:
@@ -563,7 +583,24 @@ def main():
             return loss_t.detach(), last_hidden.detach(), last_hidden.grad.detach()
 
         t0 = time.perf_counter()
-        optimizer.step(closure)
+        if is_first_order:
+            # Standard backprop training step. `closure` isn't used by FO
+            # optimizers — we just call the model directly so the loss is in
+            # the autograd graph. step_loss + step_forwards are populated
+            # manually to keep the wandb log shape identical to ZO runs.
+            optimizer.zero_grad(set_to_none=True)
+            out = model(
+                input_ids=batch["input_ids"],
+                attention_mask=batch["attention_mask"],
+                labels=batch["labels"],
+            )
+            loss_t = out.loss
+            loss_t.backward()
+            optimizer.step()
+            step_loss["v"]     = loss_t.detach()
+            step_forwards["n"] = 1
+        else:
+            optimizer.step(closure)
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         dt = time.perf_counter() - t0
@@ -652,7 +689,11 @@ def main():
                 print(f"  [best] new best logit_acc={best['logit_accuracy']:.4f} "
                       f"(saved -> {best_dir})")
 
-            model.eval()   # keep eval mode for the next ZO step
+            # Restore mode for the next training step
+            if is_first_order:
+                model.train()
+            else:
+                model.eval()
 
     # ---- Save LAST checkpoint -----------------------------------------------
     final_meta = {

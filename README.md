@@ -53,6 +53,7 @@ python train.py --config configs/subzero.yaml     --task multirc
 
 | Method      | Owner | Class        | Module                       |
 |---|---|---|---|
+| **AdamW (FO upper bound)** | maria | `AdamW` | `torch.optim.AdamW` (built-in) |
 | MeZO        | cheng | `MeZO`       | `optimizers/mezo.py`         |
 | Sparse-MeZO | maria | `SparseMeZO` | `optimizers/sparse_mezo.py`  |
 | HiZOO       | maria | `HiZOO`      | `optimizers/hizoo.py`        |

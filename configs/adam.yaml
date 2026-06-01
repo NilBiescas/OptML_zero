@@ -1,0 +1,28 @@
+# AdamW first-order baseline. Sets the upper bound for the comparison plot —
+# expected to outperform every ZO method on accuracy at the cost of ~3x
+# memory (gradients + Adam moments) and a backprop forward path.
+owner: maria
+
+model:
+  name: Qwen/Qwen3.5-0.8B
+  dtype: float32      # Adam is unstable in fp16/bf16 at small lr; Qwen-0.8B
+                      # in fp32 is fine memory-wise on H100 (~10 GB).
+
+training:
+  seed: 42
+  batch_size: 16
+  max_steps: 20000    # match the ZO budget for fair compute comparison
+  eval_steps: 500
+  num_train: 1000
+  num_eval: 1000
+
+optimizer:
+  name: AdamW
+  kwargs:
+    lr: 1.0e-5
+    weight_decay: 0.0
+    betas: [0.9, 0.999]
+    eps: 1.0e-8
+
+hub:
+  push_to_hub: true
