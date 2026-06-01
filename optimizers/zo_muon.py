@@ -276,11 +276,16 @@ class ZOMuon(Optimizer):
                 state = self.state[p]
 
                 if p.dim() >= 2:
-                    # G_full = G_low @ P^T  in R^{out x in}
-                    G_full = state['G_low'] @ state['P'].t()
-                    G_full = G_full.view_as(p.data)
+                    # G_full = G_low @ P^T  is (out x in_flat), already 2D.
+                    # Run Newton-Schulz on this FLAT 2D form. Do NOT view_as(p)
+                    # first: a 3D+ param (e.g. Qwen packs some weights as 3D)
+                    # would make G 3D and trip the NS 2D assertion. Orthogonalise
+                    # the (out, in_flat) matrix, then reshape the RESULT to p's
+                    # shape only when applying the update.
+                    G_full = state['G_low'] @ state['P'].t()   # (out, in_flat), 2D
                     ns_steps = group.get('ns_steps', 5)
                     O = _newton_schulz_5(G_full, steps=ns_steps)
+                    O = O.view_as(p.data)                      # back to p's shape
                     # Match the official OPTML-Group/ZO-Muon repo: NO Muon
                     # *0.2 RMS rescale (an earlier attempt added it on a
                     # reviewer's recommendation; in practice it shrank every
