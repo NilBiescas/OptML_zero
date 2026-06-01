@@ -136,7 +136,10 @@ def load_task(task_name: str, num_train: int, seed: int) -> Tuple[TaskSpec, Data
     if task_name not in TASKS:
         raise ValueError(f"Unknown task '{task_name}'. Registered: {list(TASKS)}")
     spec = TASKS[task_name]
-    ds = load_dataset("super_glue", spec.hf_subset, trust_remote_code=True)
+    # Use the namespaced "aps/super_glue" id: newer huggingface_hub rejects the
+    # bare "super_glue" loader ("Repository id must be 'namespace/name'"), which
+    # crashed every job at load_task. aps/super_glue is the maintained mirror.
+    ds = load_dataset("aps/super_glue", spec.hf_subset, trust_remote_code=True)
     if num_train and len(ds["train"]) > num_train:
         ds["train"] = ds["train"].shuffle(seed=seed).select(range(num_train))
     return spec, ds
