@@ -16,10 +16,10 @@ model:
 training:
   seed: 42
   batch_size: 16
-  max_steps: 1500
+  max_steps: 6000
   eval_steps: 500
   num_train: 1000
-  num_eval: 200
+  num_eval: 1000
 
 optimizer:
   name: ConMeZO
@@ -28,7 +28,7 @@ optimizer:
     eps: 1.0e-3
     cone_theta: 1.35          # wide cone (~0.97 random, ~0.22 momentum)
     cone_beta: 0.99           # final EMA rate for the momentum direction
-    cone_warmup_total: 1500  # matches max_steps -> paper §3.4 schedule scaling
+    cone_warmup_total: 6000  # matches max_steps -> paper §3.4 schedule scaling
     seed: 42
 
 hub:
