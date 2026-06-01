@@ -124,11 +124,19 @@ class ZOMuon(Optimizer):
             return  # 1D fallback path doesn't use P
 
         in_dim = p.numel() // p.size(0)
+        # Effective rank: a reduced QR of an (in_dim x r) Gaussian yields a Q
+        # with only min(in_dim, r) orthonormal columns. If we kept asking for r
+        # columns while in_dim < r, P would silently come back (in_dim x in_dim)
+        # and the later U_k @ P^T (with U_k still r-wide) would shape-mismatch
+        # (RuntimeError: mat1 and mat2 shapes cannot be multiplied). Qwen has 2D
+        # weights with in_dim < 64 (e.g. small projections), so clamp the rank.
+        r_eff = min(r, in_dim)
+        state['r_eff'] = r_eff
         need_refresh = ('P' not in state) or (state['step'] % refresh_T == 0)
         if need_refresh:
-            # Generate Gaussian then QR -> orthonormal columns in R^{in x r}.
+            # Generate Gaussian then QR -> orthonormal columns in R^{in x r_eff}.
             # QR in float32 for numerical stability (LAPACK quirks in bf16/fp16).
-            G = torch.randn(in_dim, r, dtype=torch.float32, device=p.device,
+            G = torch.randn(in_dim, r_eff, dtype=torch.float32, device=p.device,
                             generator=generator)
             Q, _ = torch.linalg.qr(G, mode='reduced')
             state['P'] = Q.to(p.dtype)
@@ -163,7 +171,9 @@ class ZOMuon(Optimizer):
                 # Allocate the gradient accumulators.
                 if p.dim() >= 2:
                     self._maybe_refresh_P(p, state, group, state['generator'])
-                    state['G_low'] = torch.zeros(p.size(0), r,
+                    # G_low must match P's column count (r_eff), not the nominal
+                    # r, so the lift G_low @ P^T is well-formed when in_dim < r.
+                    state['G_low'] = torch.zeros(p.size(0), state['r_eff'],
                                                  dtype=p.dtype, device=p.device)
                     if 'momentum_buf' not in state:
                         # Keep Muon's momentum buffer in fp32: fp16 loses ~10
@@ -194,7 +204,9 @@ class ZOMuon(Optimizer):
                     state['generator'].manual_seed(param_seed + (k + 1) * 17)
 
                     if p.dim() >= 2:
-                        U_k = torch.randn(p.size(0), r, dtype=p.dtype,
+                        # U_k width must match P's r_eff columns (clamped when
+                        # in_dim < r), else U_k @ P^T shape-mismatches.
+                        U_k = torch.randn(p.size(0), state['r_eff'], dtype=p.dtype,
                                           device=p.device,
                                           generator=state['generator'])
                         state['U_k'] = U_k
