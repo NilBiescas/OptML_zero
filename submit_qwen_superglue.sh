@@ -53,7 +53,7 @@ runai submit \
   --preemptible \
   --environment HF_HUB_ENABLE_HF_TRANSFER=1 \
   --environment WANDB_API_KEY="${WANDB_API_KEY}" \
-  --environment WANDB_ENTITY="${WANDB_ENTITY:-mpilligua}" \
+  --environment WANDB_ENTITY="${WANDB_ENTITY:-}" \
   --environment WANDB_PROJECT="Zero-Order-Opt" \
   --environment RUN_OWNER="cheng" \
   --environment METHOD="${METHOD}" \
@@ -73,5 +73,5 @@ cat <<EOF
 >>> Job submitted: ${JOB_NAME}
 Stream logs: runai logs -f ${JOB_NAME} -p ${PROJECT}
 Delete job:  runai delete job ${JOB_NAME} -p ${PROJECT}
-WandB:       https://wandb.ai/${WANDB_ENTITY:-mpilligua}/Zero-Order-Opt
+WandB:       project Zero-Order-Opt (entity = owner of WANDB_API_KEY, or \$WANDB_ENTITY)
 EOF
