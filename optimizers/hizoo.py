@@ -273,7 +273,7 @@ class HiZOO(Optimizer):
                 self.state[param]["hessian"] = (
                     (1 - Hessian_smooth) * self.state[param]["hessian"]
                     + Hessian_estimator
-                )
+                ).clamp(min=1e-8)  # floor prevents 1/sqrt(H)→inf in fp16
 
                 grad = (
                     (loss1 - loss2) / (2 * zo_eps)
