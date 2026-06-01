@@ -1,0 +1,38 @@
+# Paper-faithful reproduction: FZOO on OPT-13B / SST-2.
+# Same recipe as opt1.3b but LR=1e-6 and larger model. Paper claims FZOO
+# reaches Adam-scale convergence in ~500 steps via batched forward passes.
+
+dataset:
+  template: "mezo"
+  task: "sst2"
+  num_train: 1000
+  num_dev: 500
+  num_eval: 1000
+
+model:
+  name: "facebook/opt-13b"
+  freeze_backbone: false
+  dtype: "float16"
+
+training:
+  epochs: 1
+  batch_size: 64
+  seed: 0
+  max_steps: 500
+  eval_steps: 50
+
+optimizer:
+  name: "FZOO"
+  kwargs:
+    lr: 1.0e-6
+    eps: 1.0e-3
+    Nq: 2
+    sigma_floor: 1.0e-6
+    seed: 0
+
+scheduler:
+  type: constant
+
+hub:
+  push_to_hub: false
+  repo_id: null

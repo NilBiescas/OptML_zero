@@ -1,0 +1,40 @@
+# Paper-faithful reproduction: ZO-Muon on OPT-1.3B / RTE.
+# Same recipe as opt1.3b_sst2; only the task name changes (super_glue/rte).
+
+dataset:
+  template: "mezo"
+  task: "rte"
+  num_train: 1000
+  num_dev: 500
+  num_eval: 1000
+
+model:
+  name: "facebook/opt-1.3b"
+  freeze_backbone: false
+  dtype: "float16"
+
+training:
+  epochs: 1
+  batch_size: 16
+  seed: 0
+  max_steps: 8000
+  eval_steps: 500
+
+optimizer:
+  name: "ZOMuon"
+  kwargs:
+    lr: 1.0e-2
+    eps: 1.0e-3
+    r: 64
+    Nq: 4
+    ns_steps: 5
+    refresh_T: 50
+    momentum: 0.0
+    seed: 0
+
+scheduler:
+  type: constant
+
+hub:
+  push_to_hub: false
+  repo_id: null

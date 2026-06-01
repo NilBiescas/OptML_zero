@@ -1,0 +1,38 @@
+# Paper-faithful reproduction: ConMeZO on OPT-1.3B / SQuAD (generative).
+# Note SQuAD uses the generative template; metric is F1.
+
+dataset:
+  template: "mezo"
+  task: "squad"
+  num_train: 1000
+  num_dev: 500
+  num_eval: 1000
+
+model:
+  name: "facebook/opt-1.3b"
+  freeze_backbone: false
+  dtype: "float16"
+
+training:
+  epochs: 1
+  batch_size: 16
+  seed: 29
+  max_steps: 20000
+  eval_steps: 2000
+
+optimizer:
+  name: "ConMeZO"
+  kwargs:
+    lr: 1.0e-7
+    eps: 1.0e-3
+    cone_theta: 1.35
+    cone_beta: 0.99
+    cone_warmup_total: 20000
+    seed: 29
+
+scheduler:
+  type: constant
+
+hub:
+  push_to_hub: false
+  repo_id: null

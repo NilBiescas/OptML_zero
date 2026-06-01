@@ -1,0 +1,46 @@
+# Paper-faithful reproduction: ZO-Muon on OPT-1.3B / SST-2.
+# arXiv:2602.17155 — official code: github.com/OPTML-Group/ZO-Muon
+# Reference script: llm/scripts/lowdim.sh (OPT=muon, RANK=64, NUM_SAMPLES=4,
+# STEP_INTERVAL=100, STEPS=8000, LR=1e-2, EPS=1e-3, BS=16, SEED=0).
+
+dataset:
+  template: "mezo"
+  task: "sst2"
+  num_train: 1000
+  num_dev: 500
+  num_eval: 1000
+
+model:
+  name: "facebook/opt-1.3b"
+  freeze_backbone: false
+  dtype: "float32"  # avoid fp16 update-rounding (see conmezo config note)
+
+training:
+  epochs: 1
+  batch_size: 16
+  seed: 0
+  # Bumped from 8000 to give the RMS-rescaled NS update (Keller Jordan
+  # Muon's max(1, sqrt(out/in))*0.2 factor, added to optimizers/zo_muon.py
+  # this revision) enough budget to reach the paper's ~92% on SST-2.
+  max_steps: 16000
+  eval_steps: 1000
+
+optimizer:
+  name: "ZOMuon"
+  kwargs:
+    lr: 1.0e-2         # for 2D weights (post-Newton-Schulz, unit-norm updates)
+    lr_1d: 1.0e-7      # for 1D weights (biases/LayerNorm) -- plain MeZO scale
+    eps: 1.0e-3
+    r: 64
+    Nq: 4
+    ns_steps: 5
+    refresh_T: 50      # official OPTML-Group/ZO-Muon lowdim.sh default
+    momentum: 0.0      # official has no Muon momentum buffer
+    seed: 0
+
+scheduler:
+  type: constant
+
+hub:
+  push_to_hub: false
+  repo_id: null

@@ -1,0 +1,41 @@
+# Paper-faithful reproduction: ConMeZO on RoBERTa-large / RTE (few-shot).
+#
+# RUN WITH:
+#   python classificationhead/train.py --config configs/conmezo/roberta_rte.yaml
+# (root train.py refuses model.classification_head=true configs.)
+
+dataset:
+  template: "mezo"
+  task: "rte"
+  num_train: 1024
+  num_dev: 256
+  num_eval: 1000
+  fewshot: true
+
+model:
+  name: "roberta-large"
+  freeze_backbone: false
+  classification_head: true
+
+training:
+  epochs: 1
+  batch_size: 64
+  seed: 13
+  max_steps: 10000
+  eval_steps: 1000
+
+optimizer:
+  name: "ConMeZO"
+  kwargs:
+    lr: 1.0e-6
+    eps: 1.0e-3
+    cone_theta: 1.35
+    cone_beta: 0.95
+    seed: 13
+
+scheduler:
+  type: constant
+
+hub:
+  push_to_hub: false
+  repo_id: null
