@@ -1,9 +1,13 @@
 # MeZO (Malladi et al. NeurIPS 2023). Vanilla SPSA baseline.
-# Implementation: optimizers/mezo.py — see Cheng's `chenghengli` branch for reference.
+# Implementation: optimizers/mezo.py — ported from Cheng's `chenghengli` branch
+# (validated on OPT-1.3B/SST-2 at 92.3% test). The reference ZO method every
+# other optimizer here is measured against.
 owner: cheng
 
 model:
   name: Qwen/Qwen3.5-0.8B
+  # float32: MeZO's step is lr*c*z with lr=1e-7; bf16/fp16 rounds it to zero.
+  dtype: float32
 
 training:
   seed: 42
@@ -16,4 +20,9 @@ training:
 optimizer:
   name: MeZO
   kwargs:
-    # TODO: fill in hyperparameters from the paper / reference code
+    lr: 1.0e-7
+    eps: 1.0e-3
+    seed: 42
+
+hub:
+  push_to_hub: false   # WandB-only run; no HF checkpoint push (avoids HF-auth fast-fail)
