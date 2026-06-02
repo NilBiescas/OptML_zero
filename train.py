@@ -493,27 +493,40 @@ def main():
                 )
             lr_scheduler = accelerator.prepare(lr_scheduler)
 
-        # Initialize SubZero and PseuZO helpers if applicable
+        # Initialize Exact Method Helpers if applicable
         subzero_helper = None
         pzo_helper = None
+        lozo_helper = None
         if opt_name == "SubZero":
             class ArgsObj:
                 def __init__(self, opt_cfg):
-                    self.zo_eps = opt_cfg.get('kwargs', {}).get('zo_eps', 1e-3)
-                    self.gauss_rank = opt_cfg.get('kwargs', {}).get('gauss_rank', 8)
-                    self.update_interval = opt_cfg.get('kwargs', {}).get('update_interval', 2000)
-                    self.mode = opt_cfg.get('kwargs', {}).get('mode', 'ft')
-                    self.perturbation_mode = opt_cfg.get('kwargs', {}).get('perturbation_mode', 'two_side')
-                    self.q = opt_cfg.get('kwargs', {}).get('q', 1)
+                    kwargs = opt_cfg.get('kwargs', {})
+                    self.zo_eps = float(kwargs.get('zo_eps', 1e-3))
+                    self.gauss_rank = int(kwargs.get('gauss_rank', 8))
+                    self.update_interval = int(kwargs.get('update_interval', 2000))
+                    self.mode = kwargs.get('mode', 'ft')
+                    self.perturbation_mode = kwargs.get('perturbation_mode', 'two_side')
+                    self.q = int(kwargs.get('q', 1))
                     self.gradient_accumulation_steps = 1
             subzero_helper = SubZeroTrainerHelper(ArgsObj(opt_config), optimizer, lr_scheduler)
         elif opt_name == "PseuZO":
             class ArgsObj:
                 def __init__(self, opt_cfg):
-                    self.zo_eps = opt_cfg.get('kwargs', {}).get('zo_eps', 1e-3)
-                    self.weight_decay = opt_cfg.get('kwargs', {}).get('weight_decay', 0.0)
+                    kwargs = opt_cfg.get('kwargs', {})
+                    self.zo_eps = float(kwargs.get('zo_eps', 1e-3))
+                    self.weight_decay = float(kwargs.get('weight_decay', 0.0))
             pzo_helper = PZOTrainerHelper(ArgsObj(opt_config), optimizer, lr_scheduler)
-            pzo_helper.reset_momentum_fb(opt_config.get('kwargs', {}).get('momentum_fb', 0.9))
+            pzo_helper.reset_momentum_fb(float(opt_config.get('kwargs', {}).get('momentum_fb', 0.9)))
+        elif opt_name == "LOZO":
+            class ArgsObj:
+                def __init__(self, opt_cfg):
+                    kwargs = opt_cfg.get('kwargs', {})
+                    self.zo_eps = float(kwargs.get('eps', 1e-3))
+                    self.rank_r = int(kwargs.get('r', 4))
+                    self.step_interval = int(kwargs.get('nu', 50))
+                    self.weight_decay = float(kwargs.get('weight_decay', 0.0))
+                    self.gradient_accumulation_steps = 1
+            lozo_helper = LOZOTrainerHelper(ArgsObj(opt_config), optimizer, lr_scheduler)
     else:
         # Standard first-order optimizer
         if hasattr(torch.optim, opt_name):
