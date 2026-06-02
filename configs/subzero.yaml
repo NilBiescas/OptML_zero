@@ -31,4 +31,4 @@ optimizer:
 
 hub:
   push_to_hub: true
-  repo_id: "mpilligua/zo-subzero-qwen"
+  repo_id: "Nbiescas/zo-subzero-qwen"

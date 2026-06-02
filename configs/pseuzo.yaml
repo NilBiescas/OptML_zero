@@ -27,4 +27,4 @@ optimizer:
 
 hub:
   push_to_hub: true
-  repo_id: "mpilligua/zo-pseuzo-qwen"
+  repo_id: "Nbiescas/zo-pseuzo-qwen"
