@@ -20,7 +20,8 @@ sys.path.append(os.path.join(_script_dir, "PseuZO"))
 sys.path.append(os.path.join(_script_dir, "LOZO"))
 from subzero_helper import SubZeroTrainerHelper
 from pzo_helper import PZOTrainerHelper
-from lozo_helper import LOZO, LOZOM
+from lozo_helper import LOZO, LOZOM, SparseMeZO, DiZO, MeZO, HiZOO, ConMeZO, FZOO, ZOMuon
+from zo_helpers import LOZOTrainerHelper, PZOTrainerHelper, SubZeroTrainerHelper
 
 
 @torch.no_grad()

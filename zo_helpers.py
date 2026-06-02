@@ -206,7 +206,7 @@ class PZOTrainerHelper:
         loss, o0, grad_last = self.pzo_forward(model, inputs_copy, need_grad=True)
         self.pzo_perturb_parameters(random_seed, 1)
         loss1, o1, _ = self.pzo_forward(model, inputs, need_grad=False)
-        self.grad_last = grad_last[0]
+        self.grad_last = grad_last
         self.pzo_perturb_parameters(random_seed, -1)
         o = o1 - o0
         self.o_last = o0
