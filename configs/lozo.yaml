@@ -1,24 +1,31 @@
 dataset:
   template: "mezo"
-  task: "sst2" # overridden by --task
+  task: "multirc"
   num_train: 1000
   num_dev: 500
   num_eval: 1000
 
 model:
-  name: "facebook/opt-1.3b"
+  name: "Qwen/Qwen2.5-0.5B"
   dtype: "float16"
 
 training:
-  max_steps: 20000
+  seed: 87
   batch_size: 16
-  seed: 42
+  max_steps: 20000
   eval_steps: 500
+  lr_scheduler:
+    type: "constant"
 
 optimizer:
   name: "LOZO"
   kwargs:
-    lr: 5.0e-7
-    eps: 1.0e-3
-    r: 8
+    lr: 1e-7
+    eps: 1e-3
+    weight_decay: 0.0
+    r: 1
     nu: 100
+
+hub:
+  push_to_hub: true
+  repo_id: "mpilligua/zo-lozo-qwen"
