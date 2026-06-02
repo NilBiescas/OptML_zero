@@ -1,0 +1,24 @@
+dataset:
+  template: "mezo"
+  task: "sst2" # overridden by --task
+  num_train: 1000
+  num_dev: 500
+  num_eval: 1000
+
+model:
+  name: "facebook/opt-1.3b"
+  dtype: "float16"
+
+training:
+  max_steps: 20000
+  batch_size: 16
+  seed: 42
+  eval_steps: 500
+
+optimizer:
+  name: "LOZO"
+  kwargs:
+    lr: 5.0e-7
+    eps: 1.0e-3
+    r: 8
+    nu: 100

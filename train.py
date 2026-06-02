@@ -12,14 +12,15 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 from huggingface_hub import HfApi
 
-from optimizers.lozo import LOZOM, LOZO
-from optimizers.sparse_mezo import SparseMeZO
-from optimizers.dizo import DiZO
-from optimizers.mezo import MeZO
-from optimizers.hizoo import HiZOO
-from optimizers.conmezo import ConMeZO
-from optimizers.fzoo import FZOO
-from optimizers.zo_muon import ZOMuon
+# Add subfolders to Python search path for dynamic helper loading
+import sys
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.append(os.path.join(_script_dir, "SubZero", "large_models"))
+sys.path.append(os.path.join(_script_dir, "PseuZO"))
+sys.path.append(os.path.join(_script_dir, "LOZO"))
+from subzero_helper import SubZeroTrainerHelper
+from pzo_helper import PZOTrainerHelper
+from lozo_helper import LOZO, LOZOM
 
 
 @torch.no_grad()
@@ -391,7 +392,7 @@ def main():
     
     is_zeroth_order = opt_name in [
         "LOZO", "LOZOM", "SparseMeZO", "DiZO", "MeZO", "HiZOO",
-        "ConMeZO", "FZOO", "ZOMuon",
+        "ConMeZO", "FZOO", "ZOMuon", "SubZero", "PseuZO",
     ]
 
     if is_zeroth_order:
@@ -412,6 +413,21 @@ def main():
             optimizer = FZOO(model.parameters(), **opt_kwargs)
         elif opt_name == "ZOMuon":
             optimizer = ZOMuon(model.parameters(), **opt_kwargs)
+        elif opt_name in ["SubZero", "PseuZO"]:
+            # SubZero and PseuZO use a standard first-order optimizer under the hood.
+            # We instantiate standard SGD or Adam depending on configuration
+            fo_name = opt_kwargs.get('first_order_name', 'SGD')
+            
+            # Clean up kwargs to only pass standard first-order arguments to SGD/Adam
+            fo_kwargs = {
+                'lr': opt_kwargs.get('lr', 1e-7),
+                'weight_decay': opt_kwargs.get('weight_decay', 0.0)
+            }
+            if fo_name == 'SGD' and 'momentum' in opt_kwargs:
+                fo_kwargs['momentum'] = opt_kwargs['momentum']
+            
+            opt_class = getattr(torch.optim, fo_name)
+            optimizer = opt_class(model.parameters(), **fo_kwargs)
         else:
             optimizer = LOZO(model.parameters(), **opt_kwargs)
 
@@ -476,6 +492,28 @@ def main():
                     num_training_steps=num_training_steps,
                 )
             lr_scheduler = accelerator.prepare(lr_scheduler)
+
+        # Initialize SubZero and PseuZO helpers if applicable
+        subzero_helper = None
+        pzo_helper = None
+        if opt_name == "SubZero":
+            class ArgsObj:
+                def __init__(self, opt_cfg):
+                    self.zo_eps = opt_cfg.get('kwargs', {}).get('zo_eps', 1e-3)
+                    self.gauss_rank = opt_cfg.get('kwargs', {}).get('gauss_rank', 8)
+                    self.update_interval = opt_cfg.get('kwargs', {}).get('update_interval', 2000)
+                    self.mode = opt_cfg.get('kwargs', {}).get('mode', 'ft')
+                    self.perturbation_mode = opt_cfg.get('kwargs', {}).get('perturbation_mode', 'two_side')
+                    self.q = opt_cfg.get('kwargs', {}).get('q', 1)
+                    self.gradient_accumulation_steps = 1
+            subzero_helper = SubZeroTrainerHelper(ArgsObj(opt_config), optimizer, lr_scheduler)
+        elif opt_name == "PseuZO":
+            class ArgsObj:
+                def __init__(self, opt_cfg):
+                    self.zo_eps = opt_cfg.get('kwargs', {}).get('zo_eps', 1e-3)
+                    self.weight_decay = opt_cfg.get('kwargs', {}).get('weight_decay', 0.0)
+            pzo_helper = PZOTrainerHelper(ArgsObj(opt_config), optimizer, lr_scheduler)
+            pzo_helper.reset_momentum_fb(opt_config.get('kwargs', {}).get('momentum_fb', 0.9))
     else:
         # Standard first-order optimizer
         if hasattr(torch.optim, opt_name):
@@ -713,28 +751,52 @@ def main():
                     accelerator.print(f"\n[DEBUG Step {global_step}] Batch input_ids: {batch['input_ids'].shape}, Non-masked labels: {non_masked}/{total_elem}")
 
                 unwrapped_model = accelerator.unwrap_model(model)
-                step_loss_container = []
-                def closure():
-                    outputs = unwrapped_model(
-                        input_ids=batch["input_ids"],
-                        attention_mask=batch["attention_mask"],
-                        labels=batch["labels"]
-                    )
-                    loss = outputs.loss
-                    if debug_print:
-                        accelerator.print(f"[DEBUG Step {global_step}] Raw Model loss: {loss.item() if loss is not None else 'None'}")
-                    # Distributed reduction for multi-GPU ZO gradient consistency
-                    avg_loss = accelerator.reduce(loss.detach(), reduction="mean")
-                    if debug_print:
-                        accelerator.print(f"[DEBUG Step {global_step}] Reduced avg_loss: {avg_loss.item() if avg_loss is not None else 'None'}")
-                    step_loss_container.append(avg_loss.item())
-                    return avg_loss
-                    
-                optimizer.step(closure)
-                loss = step_loss_container[0] if len(step_loss_container) > 0 else 0.0
-                total_loss += loss
-                progress_bar.set_description(f"Epoch {epoch+1} Loss: {loss:.4f}")
-                train_loss_val = loss
+                
+                if opt_name == "SubZero":
+                    subzero_helper.state.global_step = global_step
+                    loss = subzero_helper.zo_subspace_step(unwrapped_model, batch)
+                    subzero_helper.zo_subspace_update(unwrapped_model)
+                    loss_val = loss.item() if isinstance(loss, torch.Tensor) else loss
+                    total_loss += loss_val
+                    progress_bar.set_description(f"Epoch {epoch+1} Loss: {loss_val:.4f}")
+                    train_loss_val = loss_val
+                elif opt_name == "PseuZO":
+                    loss = pzo_helper.pzo_step(unwrapped_model, batch)
+                    pzo_helper.pzo_update(unwrapped_model)
+                    loss_val = loss.item() if isinstance(loss, torch.Tensor) else loss
+                    total_loss += loss_val
+                    progress_bar.set_description(f"Epoch {epoch+1} Loss: {loss_val:.4f}")
+                    train_loss_val = loss_val
+                elif opt_name == "LOZO":
+                    loss = lozo_helper.lowrank_zo_step(unwrapped_model, batch)
+                    lozo_helper.lowrank_zo_update()
+                    loss_val = loss.item() if isinstance(loss, torch.Tensor) else loss
+                    total_loss += loss_val
+                    progress_bar.set_description(f"Epoch {epoch+1} Loss: {loss_val:.4f}")
+                    train_loss_val = loss_val
+                else:
+                    step_loss_container = []
+                    def closure():
+                        outputs = unwrapped_model(
+                            input_ids=batch["input_ids"],
+                            attention_mask=batch["attention_mask"],
+                            labels=batch["labels"]
+                        )
+                        loss = outputs.loss
+                        if debug_print:
+                            accelerator.print(f"[DEBUG Step {global_step}] Raw Model loss: {loss.item() if loss is not None else 'None'}")
+                        # Distributed reduction for multi-GPU ZO gradient consistency
+                        avg_loss = accelerator.reduce(loss.detach(), reduction="mean")
+                        if debug_print:
+                            accelerator.print(f"[DEBUG Step {global_step}] Reduced avg_loss: {avg_loss.item() if avg_loss is not None else 'None'}")
+                        step_loss_container.append(avg_loss.item())
+                        return avg_loss
+                        
+                    optimizer.step(closure)
+                    loss = step_loss_container[0] if len(step_loss_container) > 0 else 0.0
+                    total_loss += loss
+                    progress_bar.set_description(f"Epoch {epoch+1} Loss: {loss:.4f}")
+                    train_loss_val = loss
             else:
                 # First order standard training
                 with accelerator.accumulate(model):
