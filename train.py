@@ -413,18 +413,18 @@ def main():
             optimizer = FZOO(model.parameters(), **opt_kwargs)
         elif opt_name == "ZOMuon":
             optimizer = ZOMuon(model.parameters(), **opt_kwargs)
-        elif opt_name in ["SubZero", "PseuZO"]:
-            # SubZero and PseuZO use a standard first-order optimizer under the hood.
+        elif opt_name in ["SubZero", "PseuZO", "LOZO"]:
+            # These methods use a standard first-order optimizer under the hood.
             # We instantiate standard SGD or Adam depending on configuration
             fo_name = opt_kwargs.get('first_order_name', 'SGD')
             
             # Clean up kwargs to only pass standard first-order arguments to SGD/Adam
             fo_kwargs = {
-                'lr': opt_kwargs.get('lr', 1e-7),
-                'weight_decay': opt_kwargs.get('weight_decay', 0.0)
+                'lr': float(opt_kwargs.get('lr', 1e-7)),
+                'weight_decay': float(opt_kwargs.get('weight_decay', 0.0))
             }
             if fo_name == 'SGD' and 'momentum' in opt_kwargs:
-                fo_kwargs['momentum'] = opt_kwargs['momentum']
+                fo_kwargs['momentum'] = float(opt_kwargs['momentum'])
             
             opt_class = getattr(torch.optim, fo_name)
             optimizer = opt_class(model.parameters(), **fo_kwargs)
