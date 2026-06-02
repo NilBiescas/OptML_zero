@@ -64,11 +64,11 @@ class SubZeroTrainerHelper:
         for name, param in model.named_parameters():
             if param.requires_grad:
                 if len(torch.squeeze(param.data).shape) == 2:
-                    if self.state.global_step == 0:
-                        self.p_state[name] = {'U': torch.zeros(param.data.size(0), args.gauss_rank), 
-                                                'V': torch.zeros(args.gauss_rank, param.data.size(1))}
+                    if getattr(self.state, 'global_step', 0) == 0 or name not in self.p_state:
+                        self.p_state[name] = {'U': torch.zeros(param.data.size(0), args.gauss_rank, device=param.device, dtype=param.dtype), 
+                                                'V': torch.zeros(args.gauss_rank, param.data.size(1), device=param.device, dtype=param.dtype)}
                     p_state = self.p_state[name]          
-                    if self.state.global_step % args.update_interval == 0:
+                    if getattr(self.state, 'global_step', 0) % args.update_interval == 0:
                         if args.mode in ['lora', 'prefix', 'prompt']:
                             w_shape = reshape_matrix(param.data.numel())
                             U, V = fast_svd_method_v2(w_shape=w_shape, device=param.device, dtype=param.data.dtype, rank=args.gauss_rank)
@@ -117,8 +117,7 @@ class SubZeroTrainerHelper:
             param.grad = None
             
         self.update_steps += 1
-        if self.lr_scheduler is not None:
-            self.lr_scheduler.step()
+        pass
 
 # =========================================================================
 # PseuZO Helper
@@ -239,8 +238,7 @@ class PZOTrainerHelper:
                         param.data = param.data - self._get_learning_rate() * (project_value * z + args.weight_decay * param.data)
                     else:
                         param.data = param.data - self._get_learning_rate() * (project_value * z) 
-        if self.lr_scheduler is not None:
-            self.lr_scheduler.step()
+        pass
 
 # =========================================================================
 # LOZO Helper
@@ -274,7 +272,7 @@ class LOZOTrainerHelper:
         
         for name, param in self.named_parameters_to_optim:
             if param.data.ndim >= 2:
-                if step % args.step_interval == 0:
+                if step % args.step_interval == 0 or name not in self.v:
                     v = torch.randn(param.data.size(1), args.rank_r, device=param.data.device, dtype=param.data.dtype)
                     self.v[name] = v
                 else:
@@ -299,12 +297,6 @@ class LOZOTrainerHelper:
     @torch.no_grad()
     def lowrank_zo_step(self, model, inputs):
         args = self.args
-        if hasattr(self, 'step'):
-            self.step += 1
-        else:
-            self.step = 0
-            self.v = {}
-
         self.named_parameters_to_optim = []
         for name, param in model.named_parameters():
             if param.requires_grad:
@@ -345,5 +337,5 @@ class LOZOTrainerHelper:
                 else:
                     param.data = param.data - self._get_learning_rate() * (self.projected_grad * z)
 
-        if self.lr_scheduler is not None:
-            self.lr_scheduler.step()
+        pass
+        self.step += 1
