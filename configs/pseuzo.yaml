@@ -1,6 +1,6 @@
 dataset:
   template: "mezo"
-  task: "copa"
+  task: "multirc"
   num_train: 1000
   num_dev: 500
   num_eval: 1000
@@ -28,4 +28,4 @@ optimizer:
 
 hub:
   push_to_hub: true
-  repo_id: "Nbiescas/zo-pseuzo-copa-qwen"
+  repo_id: "Nbiescas/zo-pseuzo-qwen"
