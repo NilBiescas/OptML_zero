@@ -532,6 +532,12 @@ def main():
     last_eval = None  # final eval metrics (for the [Done] summary)
 
     while global_step < max_steps:
+        # ---- Epoch Hooks ----
+        if global_step % steps_per_epoch == 0 and opt_name == "PseuZO":
+            epoch_idx = global_step // steps_per_epoch
+            if hasattr(optimizer, "on_epoch_start"):
+                optimizer.on_epoch_start(epoch_idx, math.ceil(total_epochs))
+
         try:
             batch = next(train_iter)
         except StopIteration:

@@ -18,4 +18,10 @@ training:
 optimizer:
   name: SubZero
   kwargs:
-    # TODO: fill in hyperparameters from the paper / reference code
+    lr: 1e-7            # matches submit_subzero.sh learning_rate
+    eps: 1e-3
+    weight_decay: 0.0
+    gauss_rank: 24       # matches submit_subzero.sh (not default 8)
+    update_interval: 1000 # matches submit_subzero.sh (not default 10)
+    perturbation_mode: two_side
+    mode: full

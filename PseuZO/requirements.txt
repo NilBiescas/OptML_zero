@@ -1,0 +1,8 @@
+wandb
+scikit-learn
+datasets<3.0.0
+accelerate
+transformers
+modelscope
+addict
+loralib

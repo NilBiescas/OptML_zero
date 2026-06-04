@@ -18,4 +18,8 @@ training:
 optimizer:
   name: PseuZO
   kwargs:
-    # TODO: fill in hyperparameters from the paper / reference code
+    lr: 1e-7              # matches submit_pseuzo.sh LR
+    eps: 1e-3
+    weight_decay: 0.0
+    sliding_window_length: 14
+    momentum_fb: 0.9

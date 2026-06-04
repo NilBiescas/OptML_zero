@@ -19,6 +19,9 @@ checkpoints/
 # Output runs
 runs/
 LOZO/
+SubZero/
+PseuZO/
+submit_multirc_nil.sh
 .deploy_keys/
 # Environment variables
 .env
