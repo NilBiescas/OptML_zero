@@ -1,966 +1,789 @@
-import os
-import json
-import yaml
+"""Unified ZO comparison harness for Qwen-0.8B on SuperGLUE.
+
+Goal: run any of MeZO / Sparse-MeZO / LOZO / DiZO / HiZOO / QuZO / ZO-Muon /
+ConMeZO / FZOO / PseuZO / SubZero under the SAME setup (model, dataset,
+prompts, eval protocol) so the team's head-to-head numbers are apples-to-apples.
+The optimizer is selected via the YAML config; the task (multirc | copa) is
+selected via the --task CLI flag.
+
+Metrics logged to WandB (project `Zero-Order-Opt`):
+  train/        loss, step_time_sec, avg_step_time_sec, step, epoch,
+                datapoints_seen, forwards_this_step, total_forwards
+  mem/          current_MB, peak_MB
+  eval/         token_accuracy, logit_accuracy, num_examples
+  best_eval/    logit_accuracy, token_accuracy, at_step, at_forwards, at_time_sec
+  opt/<key>     any per-step diagnostics the optimizer exposes via
+                `optimizer.last_metrics` (a dict). Optional.
+  final/        total_steps, total_forwards, avg_step_time_sec, total_time_sec,
+                peak_mem_MB, plus duplicates of the best_eval/* entries.
+
+Each run is tagged with [owner, method, task] and grouped by task so the
+WandB dashboard auto-organises by-task.
+
+WandB run name: {owner}-{method}-{task}-{mm_dd_hh_mm_ss}  (UTC)
+  owner ∈ {maria, nil, cheng}, read from --owner, $RUN_OWNER, or `owner:`
+  in the YAML.
+
+Usage:
+  python train.py --config configs/mezo.yaml         --task multirc
+  python train.py --config configs/sparse_mezo.yaml  --task copa
+  RUN_OWNER=nil python train.py --config configs/lozo.yaml --task multirc
+"""
 import argparse
-import torch
-import time
+import importlib
+import json
 import math
-from datasets import load_dataset, DatasetDict
-from transformers import AutoTokenizer, AutoModelForCausalLM, set_seed, DataCollatorForSeq2Seq, get_scheduler
-from accelerate import Accelerator
+import os
+import shutil
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+import torch
+import torch.nn.functional as F
+import wandb
+import yaml
 from torch.utils.data import DataLoader
-from tqdm import tqdm
-from huggingface_hub import HfApi
+from transformers import AutoModelForCausalLM, AutoTokenizer, set_seed
 
-# Add subfolders to Python search path for dynamic helper loading
-import sys
-_script_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.append(os.path.join(_script_dir, "SubZero", "large_models"))
-sys.path.append(os.path.join(_script_dir, "PseuZO"))
-sys.path.append(os.path.join(_script_dir, "LOZO"))
-from subzero_helper import SubZeroTrainerHelper
-from pzo_helper import PZOTrainerHelper
-from lozo_helper import LOZO, LOZOM
-from zo_helpers import LOZOTrainerHelper, PZOTrainerHelper, SubZeroTrainerHelper
+from tasks import load_task
+
+DTYPE_ALIASES = {
+    "float16":  torch.float16,
+    "fp16":     torch.float16,
+    "bfloat16": torch.bfloat16,
+    "bf16":     torch.bfloat16,
+    "float32":  torch.float32,
+    "fp32":     torch.float32,
+}
+
+# HF Hub username per team-owner. Used to derive a default `hub.repo_id` when
+# push_to_hub is on but the YAML doesn't specify one. Each person pushes to
+# their own repo so no cross-account collaborator setup is required.
+OWNER_HF_HANDLE = {
+    "maria": "mpilligua",
+    "nil":   "NilBiescas",
+    "cheng": "chenghengli",
+}
+
+# Map optimizer class name -> module filename under optimizers/.
+# train.py lazily imports only the one selected by the YAML, so missing
+# modules for methods you're not running don't break anything.
+OPTIMIZER_MODULES = {
+    "MeZO":       "mezo",         # Cheng
+    "SparseMeZO": "sparse_mezo",  # Maria
+    "HiZOO":      "hizoo",        # Maria
+    "QuZO":       "quzo",         # Maria
+    "LOZO":       "lozo",         # Nil
+    "DiZO":       "dizo",         # Cheng
+    "ZOMuon":     "zo_muon",      # Cheng
+    "ConMeZO":    "conmezo",      # Cheng
+    "FZOO":       "fzoo",         # Cheng
+    "PseuZO":     "pseuzo",       # Nil
+    "SubZero":    "subzero",      # Nil
+}
+
+# First-order optimizers — taken straight from torch.optim. Routed through a
+# separate training loop (backprop instead of closure-based ZO). Useful as the
+# upper-bound baseline for the comparison plot.
+FIRST_ORDER_OPTIMIZERS = {"Adam", "AdamW", "SGD"}
 
 
-@torch.no_grad()
-def _compute_paper_acc(model, tokenizer, raw_examples, device):
-    """Per-candidate log-likelihood eval that matches MeZO/ConMeZO/FZOO/
-    ZO-Muon papers. Each example provides (prompt, all_choices, answer_idx);
-    we score each candidate by summed token log-prob given the prompt and
-    pick the argmax. Returns scalar accuracy in [0, 1].
-    """
-    correct = 0
-    n = len(raw_examples)
-    for ex in raw_examples:
-        prompt   = ex["prompt"]
-        choices  = ex["all_choices"]
-        gold_idx = ex["answer_idx"]
-        scores = []
-        prompt_ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
-        plen = prompt_ids.size(1)
-        for cand in choices:
-            full_ids = tokenizer(prompt + cand,
-                                 return_tensors="pt").input_ids.to(device)
-            clen = full_ids.size(1) - plen
-            if clen <= 0:
-                scores.append(float("-inf")); continue
-            out = model(full_ids)
-            logp = torch.nn.functional.log_softmax(out.logits[0].float(), dim=-1)
-            total = 0.0
-            for k in range(clen):
-                total += logp[plen - 1 + k, full_ids[0, plen + k]].item()
-            scores.append(total)
-        pred = int(max(range(len(scores)), key=lambda k: scores[k]))
-        if pred == gold_idx:
-            correct += 1
-    return correct / n if n else 0.0
-
-def _try_pull_checkpoint(repo_id: str) -> None:
-    """Download last_checkpoint_causal/ from HF Hub into the working directory.
-
-    Called at pod startup so a preempted job can resume from the last pushed
-    checkpoint rather than starting from scratch. Silently does nothing if the
-    repo or folder doesn't exist yet (first run).
-    """
-    try:
-        from huggingface_hub import snapshot_download
-        snapshot_download(
-            repo_id=repo_id,
-            local_dir=".",
-            allow_patterns=["last_checkpoint_causal/**"],
-            ignore_patterns=["*.lock"],
+def load_optimizer_cls(name: str):
+    if name in FIRST_ORDER_OPTIMIZERS:
+        return getattr(torch.optim, name)
+    if name not in OPTIMIZER_MODULES:
+        raise ValueError(
+            f"Unknown optimizer {name!r}; ZO methods: {list(OPTIMIZER_MODULES)}, "
+            f"FO methods: {sorted(FIRST_ORDER_OPTIMIZERS)}"
         )
-    except Exception:
-        pass  # repo doesn't exist yet or network error — start fresh
+    mod = importlib.import_module(f"optimizers.{OPTIMIZER_MODULES[name]}")
+    if not hasattr(mod, name):
+        raise ImportError(
+            f"optimizers/{OPTIMIZER_MODULES[name]}.py is missing class `{name}`. "
+            "Implement it first (see optimizers/__init__.py for the convention)."
+        )
+    return getattr(mod, name)
 
 
+# --------------------------------------------------------------------------
+# CLI + collator
+# --------------------------------------------------------------------------
 def parse_args():
-    parser = argparse.ArgumentParser(description="Fine-tune generative model using config")
-    parser.add_argument("--config", type=str, default="config.yaml", help="Path to YAML configuration file")
-    return parser.parse_args()
+    p = argparse.ArgumentParser()
+    p.add_argument("--config", required=True, help="Path to optimizer YAML")
+    p.add_argument("--task", required=True, choices=["multirc", "copa"],
+                   help="SuperGLUE task to train / evaluate on")
+    p.add_argument("--owner", default=None,
+                   help="Run owner: maria | nil | cheng (falls back to $RUN_OWNER or yaml owner)")
+    p.add_argument("--eval-batch-size", type=int, default=8,
+                   help="Batch size for the eval forward (eval is bottleneck if =1)")
+    p.add_argument("--ckpt-dir", default="checkpoints",
+                   help="Root dir for best/last checkpoints (one subdir per run)")
+    p.add_argument("--resume-from", default=None,
+                   help="Path to a prior run's `last/` dir to resume from "
+                        "(reuses model weights + optimizer state + step/forward/best counters)")
+    return p.parse_args()
 
+
+def pad_collate(batch, pad_id):
+    """Right-pad input_ids to the longest sequence in the batch."""
+    max_len = max(len(b["input_ids"]) for b in batch)
+    input_ids, labels, attn = [], [], []
+    for b in batch:
+        n = max_len - len(b["input_ids"])
+        input_ids.append(b["input_ids"] + [pad_id] * n)
+        labels.append(   b["labels"]    + [-100]   * n)
+        attn.append(     b["attention_mask"] + [0] * n)
+    return {
+        "input_ids":      torch.tensor(input_ids, dtype=torch.long),
+        "labels":         torch.tensor(labels,    dtype=torch.long),
+        "attention_mask": torch.tensor(attn,      dtype=torch.long),
+    }
+
+
+# --------------------------------------------------------------------------
+# Evaluation: both token-level (argmax) and logit-level (LL ranking),
+# batched to keep eval overhead from dominating the run on H100.
+# --------------------------------------------------------------------------
+@torch.no_grad()
+def evaluate(model, tokenizer, val_examples, spec, device, eval_batch_size=8):
+    model.eval()
+    pad_id = tokenizer.pad_token_id
+
+    # -------- token-level: standard cross-entropy over gold completion --------
+    train_packs = [spec.format_train(ex, tokenizer) for ex in val_examples]
+    token_correct = token_total = 0
+    for start in range(0, len(train_packs), eval_batch_size):
+        chunk = train_packs[start:start + eval_batch_size]
+        b = pad_collate(chunk, pad_id)
+        b = {k: v.to(device) for k, v in b.items()}
+        out = model(input_ids=b["input_ids"], attention_mask=b["attention_mask"],
+                    labels=b["labels"])
+        shift_logits = out.logits[:, :-1, :]
+        shift_labels = b["labels"][:, 1:]
+        mask = shift_labels != -100
+        if mask.any():
+            preds = shift_logits.argmax(dim=-1)
+            token_correct += (preds[mask] == shift_labels[mask]).sum().item()
+            token_total   += mask.sum().item()
+
+    # -------- logit-level: rank candidates by length-normalized LL ----------
+    eval_packs = [spec.format_eval(ex, tokenizer) for ex in val_examples]
+    # Flatten to per-(example, candidate) rows for batching.
+    rows = []  # (example_idx, cand_idx, full_ids, prompt_len, cand_len)
+    for ex_i, ep in enumerate(eval_packs):
+        for c_idx, cand_ids in enumerate(ep["candidates"]):
+            full = ep["prompt_ids"] + cand_ids
+            rows.append((ex_i, c_idx, full, len(ep["prompt_ids"]), len(cand_ids)))
+
+    max_cands = max(len(ep["candidates"]) for ep in eval_packs)
+    cand_lls  = [[None] * max_cands for _ in val_examples]
+
+    for start in range(0, len(rows), eval_batch_size):
+        chunk   = rows[start:start + eval_batch_size]
+        max_len = max(len(r[2]) for r in chunk)
+        ids_list, attn_list = [], []
+        for _, _, full, _, _ in chunk:
+            pad_n = max_len - len(full)
+            ids_list.append(full + [pad_id] * pad_n)
+            attn_list.append([1] * len(full) + [0] * pad_n)
+        ids  = torch.tensor(ids_list,  dtype=torch.long, device=device)
+        attn = torch.tensor(attn_list, dtype=torch.long, device=device)
+        logits    = model(input_ids=ids, attention_mask=attn).logits  # [B, L, V]
+        log_probs = torch.log_softmax(logits, dim=-1)
+        for row_i, (ex_i, c_idx, full, prompt_len, cand_len) in enumerate(chunk):
+            # LL of cand token at full[prompt_len + k] is log_probs[row, prompt_len + k - 1, tok]
+            ll = 0.0
+            for k in range(cand_len):
+                tok_id = full[prompt_len + k]
+                ll += log_probs[row_i, prompt_len + k - 1, tok_id].item()
+            ll /= max(1, cand_len)   # length-normalize: COPA candidates have unequal lengths
+            cand_lls[ex_i][c_idx] = ll
+
+    logit_correct = 0
+    for ex_i, ep in enumerate(eval_packs):
+        n_c    = len(ep["candidates"])
+        scores = [cand_lls[ex_i][c] for c in range(n_c)]
+        pred   = max(range(n_c), key=lambda c: scores[c])
+        if pred == ep["gold_idx"]:
+            logit_correct += 1
+
+    return {
+        "eval/token_accuracy": (token_correct / token_total) if token_total else 0.0,
+        "eval/logit_accuracy": logit_correct / len(val_examples),
+        "eval/num_examples":   len(val_examples),
+    }
+
+
+# --------------------------------------------------------------------------
+# Checkpointing
+# --------------------------------------------------------------------------
+def save_checkpoint(model, tokenizer, optimizer, dest_dir: Path,
+                    meta: dict, source_cfg_path: str | None = None):
+    """Persist model + tokenizer + optimizer state + meta + resolved YAML.
+
+    The YAML copy (+ git SHA in meta) makes any saved checkpoint
+    self-describing — combined with the optimizer state pickle, a run can be
+    resumed from disk with `--resume-from <this_dir>`.
+    """
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        model.save_pretrained(dest_dir)
+        tokenizer.save_pretrained(dest_dir)
+    except Exception as e:
+        # 8-bit / quantized models can have surprises here; don't kill the run.
+        print(f"[ckpt] save_pretrained failed at {dest_dir}: {e}")
+    try:
+        torch.save(optimizer.state_dict(), dest_dir / "optimizer.pt")
+    except Exception as e:
+        # Some custom optimizer states (closures, non-tensor objects) don't
+        # pickle cleanly — record the failure but keep the rest of the ckpt.
+        print(f"[ckpt] optimizer.state_dict() save failed at {dest_dir}: {e}")
+    if source_cfg_path:
+        try:
+            shutil.copy(source_cfg_path, dest_dir / "config.yaml")
+        except Exception as e:
+            print(f"[ckpt] config.yaml copy failed at {dest_dir}: {e}")
+    with open(dest_dir / "training_meta.json", "w") as fp:
+        json.dump(meta, fp, indent=2, default=str)
+
+
+def _git_sha() -> str | None:
+    """Best-effort git SHA of the repo train.py lives in (None if not a repo)."""
+    try:
+        import subprocess
+        out = subprocess.check_output(
+            ["git", "rev-parse", "HEAD"],
+            cwd=Path(__file__).resolve().parent,
+            stderr=subprocess.DEVNULL,
+        )
+        return out.decode().strip()
+    except Exception:
+        return None
+
+
+def _hub_push_folder(folder: Path, repo_id: str, sub_path: str, commit_message: str):
+    """Best-effort push to HF Hub. Soft-fails on any error."""
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi()
+        api.create_repo(repo_id=repo_id, exist_ok=True)
+        api.upload_folder(
+            folder_path=str(folder),
+            repo_id=repo_id,
+            path_in_repo=sub_path,
+            commit_message=commit_message,
+        )
+        return True
+    except Exception as e:
+        print(f"[hub] push to {repo_id}/{sub_path} failed: {e}")
+        return False
+
+
+def _assert_hub_writable(repo_id: str) -> None:
+    """Fail fast at startup if the HF token can't push to `repo_id`.
+
+    `push_to_hub` jobs are typically multi-hour runs; we'd rather error in the
+    first second than after 4h of compute. Tries `create_repo(exist_ok=True)`
+    which exercises the same auth path the final push will use.
+    """
+    if not os.environ.get("HF_TOKEN") and not os.environ.get("HUGGINGFACE_HUB_TOKEN"):
+        raise RuntimeError(
+            "hub.push_to_hub: true but no HF_TOKEN / HUGGINGFACE_HUB_TOKEN in env. "
+            "Export a token with write scope on the target repo before launching."
+        )
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi()
+        who = api.whoami()
+        api.create_repo(repo_id=repo_id, exist_ok=True)
+        print(f"[hub] verified write access to {repo_id} as user={who.get('name')!r}")
+    except Exception as e:
+        raise RuntimeError(
+            f"hub.push_to_hub: true but cannot write to {repo_id!r}: {e}\n"
+            "Check that HF_TOKEN has write scope and that you have access to the repo."
+        )
+
+
+# --------------------------------------------------------------------------
+# Main
+# --------------------------------------------------------------------------
 def main():
     args = parse_args()
-    
-    with open(args.config, 'r') as f:
-        config = yaml.safe_load(f)
-        
-    dataset_config = config.get('dataset', {})
-    model_config = config.get('model', {})
-    train_config = config.get('training', {})
-    opt_config = config.get('optimizer', {})
-    hub_config = config.get('hub', {})
-    
-    push_to_hub = hub_config.get('push_to_hub', False)
-    repo_id = hub_config.get('repo_id', None)
+    with open(args.config) as f:
+        cfg = yaml.safe_load(f)
 
-    seed = train_config.get('seed', 42)
-    batch_size = train_config.get('batch_size', 16)
-    epochs = train_config.get('epochs', 3)
-    max_tokens = train_config.get('max_tokens', None)
-    # New: hard step cap (paper-faithful configs set this; the legacy paths
-    # leave it None and let `epochs` drive termination).
-    max_steps = train_config.get('max_steps', None)
-    eval_steps = train_config.get('eval_steps', None)
-    eval_epochs = train_config.get('eval_epochs', 1)
-
-    # Initialize accelerator
-    accelerator = Accelerator(log_with="wandb")
-    
-    # Try to set the WandB run name to match the RunAI job name.
-    # Entity defaults to the wandb-logged-in user; override with WANDB_ENTITY.
-    # Project defaults to WANDB_PROJECT env or the legacy project name.
-    run_name    = os.environ.get("RUN_NAME", None)
-    wandb_entity = os.environ.get("WANDB_ENTITY") or None
-    wandb_kwargs = {}
-    if wandb_entity:
-        wandb_kwargs["entity"] = wandb_entity
-    if run_name:
-        wandb_kwargs["name"] = run_name
-    init_kwargs = {"init_kwargs": {"wandb": wandb_kwargs}}
-
-    project_name = os.environ.get("WANDB_PROJECT", "lozo-generative-training")
-    accelerator.init_trackers(project_name=project_name, config=config, **init_kwargs)
-    
-    # --- Preemption resume: pull last checkpoint from HF Hub before anything else ---
-    resume_state = None
-    if push_to_hub and repo_id:
-        with accelerator.main_process_first():
-            _try_pull_checkpoint(repo_id)
-        _state_path = "last_checkpoint_causal/training_state.json"
-        if os.path.exists(_state_path):
-            with open(_state_path) as _f:
-                resume_state = json.load(_f)
-            accelerator.print(
-                f"[Resume] Found checkpoint — epoch {resume_state['epoch']}, "
-                f"step {resume_state['global_step']}. Resuming."
-            )
-        else:
-            accelerator.print("[Resume] No checkpoint on HF Hub — starting fresh.")
-
-    # Crucial: set seed across all processes to ensure deterministic initializations
-    set_seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    
-    # Template / dataset dispatch.
-    # - "chat" (default, backward-compatible) -> banking77-style
-    #     "User: <text>\nAssistant: <label>" template loaded from a single
-    #     HF dataset name. This is the original behaviour of the repo.
-    # - "mezo" -> paper-faithful track. Use `data.mezo_tasks.load_mezo_task`
-    #     with the MeZO/ZO-Muon templates, dataset ids, and 1000/500/1000
-    #     sampling protocol. Required for reproducing ZO-Muon / ConMeZO / FZOO
-    #     headline numbers.
-    template_kind = dataset_config.get('template', 'chat')
-
-    # Refuse classification-head configs in this entrypoint: they target the
-    # separate classificationhead/train.py trainer that has its own head and
-    # eval logic. Catch the misroute early so the user can re-run the right
-    # script instead of training the wrong objective for hours.
-    if model_config.get('classification_head'):
+    owner = args.owner or os.environ.get("RUN_OWNER") or cfg.get("owner")
+    if owner not in {"maria", "nil", "cheng"}:
         raise ValueError(
-            "model.classification_head=True is set, which targets "
-            "classificationhead/train.py, not this script. "
-            "Re-run with: python classificationhead/train.py --config <yaml>"
+            f"--owner / RUN_OWNER / config 'owner' must be one of maria|nil|cheng (got {owner!r})"
         )
 
-    # Unified sequence length. Defaults: 128 for the legacy chat path (banking77
-    # is short), 512 for MeZO tasks (SQuAD context can be long). Always overridable
-    # via `training.max_seq_len`.
-    default_max_seq_len = 512 if template_kind == "mezo" else 128
-    max_seq_len = int(train_config.get('max_seq_len', default_max_seq_len))
+    opt_name   = cfg["optimizer"]["name"]
+    opt_kwargs = cfg["optimizer"].get("kwargs", {}) or {}
+    opt_cls    = load_optimizer_cls(opt_name)
+    is_first_order = opt_name in FIRST_ORDER_OPTIMIZERS
 
-    model_name = model_config.get('name', 'Qwen/Qwen3.5-0.8B')
-    accelerator.print(f"Loading tokenizer and causal model: {model_name}...")
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    seed       = cfg.get("training", {}).get("seed", 42)
+    batch_size = cfg.get("training", {}).get("batch_size", 16)
+    max_steps  = cfg.get("training", {}).get("max_steps", 20000)
+    eval_steps = cfg.get("training", {}).get("eval_steps", 500)
+    num_train  = cfg.get("training", {}).get("num_train", 1000)
+    num_eval   = cfg.get("training", {}).get("num_eval", 1000)
+    model_name = cfg.get("model", {}).get("name", "Qwen/Qwen3.5-0.8B")
+    # Default dtype is bfloat16: more stable than fp16 for long-horizon ZO
+    # runs (RCP1 hit fp16 underflow during Sparse-MeZO replication on WiC).
+    dtype_str  = cfg.get("model", {}).get("dtype", "bfloat16")
+    if dtype_str not in DTYPE_ALIASES:
+        raise ValueError(f"model.dtype must be one of {list(DTYPE_ALIASES)} (got {dtype_str!r})")
+    model_dtype = DTYPE_ALIASES[dtype_str]
+
+    # ---- HF Hub push (on by default) -------------------------------------
+    # Best + last ckpts are pushed once, at end of training. Each owner pushes
+    # to their own repo to avoid cross-account collaborator setup. Override
+    # the derived repo_id with `hub.repo_id: <handle>/<repo>` in the YAML, or
+    # disable entirely with `hub.push_to_hub: false`.
+    hub_cfg     = cfg.get("hub", {}) or {}
+    push_to_hub = bool(hub_cfg.get("push_to_hub", True))
+    hub_repo_id = hub_cfg.get("repo_id")
+    if push_to_hub and not hub_repo_id:
+        handle = OWNER_HF_HANDLE.get(owner)
+        if not handle:
+            raise ValueError(
+                f"hub.push_to_hub on but no `hub.repo_id` set and no default "
+                f"HF handle known for owner={owner!r}. Set hub.repo_id in the YAML "
+                "or disable with hub.push_to_hub: false."
+            )
+        hub_repo_id = f"{handle}/zo-comparison-qwen"
+        print(f"[hub] no repo_id in YAML; defaulting to {hub_repo_id}")
+
+    # ---- Resume meta (loaded early so global_step / best / total_forwards
+    # ----   are seeded from disk before training starts) ------------------
+    resume_meta = None
+    if args.resume_from:
+        resume_path = Path(args.resume_from)
+        meta_path   = resume_path / "training_meta.json"
+        if meta_path.exists():
+            with open(meta_path) as f:
+                resume_meta = json.load(f)
+            print(f"[Resume] meta from {meta_path}: "
+                  f"step={resume_meta.get('total_steps')} "
+                  f"forwards={resume_meta.get('total_forwards')} "
+                  f"best={resume_meta.get('best')}")
+        else:
+            print(f"[Resume] WARNING: no training_meta.json at {meta_path}; "
+                  "weights will load but counters start from 0.")
+
+    set_seed(seed)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # ---- Fail fast on HF auth before doing anything expensive ----
+    if push_to_hub:
+        _assert_hub_writable(hub_repo_id)
+
+    # ---- WandB: resume the SAME run if we're picking up a prior ckpt ------
+    resumed_run_id   = (resume_meta or {}).get("wandb_run_id")
+    resumed_run_name = (resume_meta or {}).get("run_name")
+    if resumed_run_id and resumed_run_name:
+        run_name = resumed_run_name
+        wandb.init(
+            project="Zero-Order-Opt",
+            id=resumed_run_id,
+            resume="allow",
+            name=run_name,
+            group=args.task,
+            tags=[owner, opt_name, args.task],
+            config={**cfg, "task": args.task, "owner": owner,
+                    "_resolved_seed": seed,
+                    "_resolved_dtype": dtype_str,
+                    "_resumed_from":   args.resume_from,
+                    "_hub_push":       push_to_hub,
+                    "_hub_repo_id":    hub_repo_id},
+        )
+        print(f"[Resume] continuing WandB run id={resumed_run_id} name={run_name}")
+    else:
+        stamp    = datetime.now(timezone.utc).strftime("%m_%d_%H_%M_%S")
+        run_name = f"{owner}-{opt_name}-{args.task}-{stamp}"
+        wandb.init(
+            project="Zero-Order-Opt",
+            name=run_name,
+            group=args.task,                          # group all multirc / all copa together
+            tags=[owner, opt_name, args.task],        # filter in the dashboard
+            config={**cfg, "task": args.task, "owner": owner,
+                    "_resolved_seed": seed,
+                    "_resolved_dtype": dtype_str,
+                    "_resumed_from":   args.resume_from,
+                    "_hub_push":       push_to_hub,
+                    "_hub_repo_id":    hub_repo_id},
+        )
+
+    # ---- Load task data ---------------------------------------------------
+    spec, ds = load_task(args.task, num_train=num_train, seed=seed)
+    val_split = "validation" if "validation" in ds else "test"
+    val_examples = list(ds[val_split])
+    if num_eval and len(val_examples) > num_eval:
+        val_examples = val_examples[:num_eval]
+    print(f"[Data] task={args.task}  train={len(ds['train'])}  eval={len(val_examples)}")
+
+    # ---- Load tokenizer + model ------------------------------------------
+    # On resume, load weights from `args.resume_from`; otherwise from HF Hub.
+    weights_src = args.resume_from if args.resume_from else model_name
+    print(f"[Model] loading {weights_src}  dtype={dtype_str}")
+    tokenizer = AutoTokenizer.from_pretrained(weights_src, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
-
-    # Raw (prompt, choices, gold_idx) tuples kept around so we can run the
-    # paper-style per-candidate LL eval at every checkpoint. Only populated
-    # for the mezo template path; chat path leaves this None.
-    raw_eval_for_paper_acc = None
-
-    if template_kind == "mezo":
-        from data.mezo_tasks import load_mezo_task
-        task_name = dataset_config.get('task')
-        if not task_name:
-            raise ValueError(
-                "config.dataset.template == 'mezo' requires "
-                "config.dataset.task (e.g. 'sst2', 'rte', 'boolq', ...)")
-        accelerator.print(f"Loading MeZO-style task '{task_name}'...")
-        num_train = dataset_config.get('num_train', 1000)
-        num_dev   = dataset_config.get('num_dev', 500)
-        num_eval  = dataset_config.get('num_eval', 1000)
-        formatted_dataset = load_mezo_task(
-            task_name, seed=seed,
-            num_train=num_train, num_dev=num_dev, num_eval=num_eval,
+    if cfg.get("model", {}).get("load_in_8bit", False):
+        from transformers import BitsAndBytesConfig
+        print("[Model] using load_in_8bit (bitsandbytes)")
+        model = AutoModelForCausalLM.from_pretrained(
+            weights_src, trust_remote_code=True,
+            quantization_config=BitsAndBytesConfig(load_in_8bit=True),
+            device_map={"": 0},
         )
-
-        # Capture raw eval examples BEFORE column-stripping, for the
-        # per-candidate LL eval that matches paper accuracy. Use the held-out
-        # "test" split (= the GLUE validation set, 1000 ex) — what the paper
-        # reports on. The "validation" split here is just the dev carve from
-        # the train pool (500 ex) and inflates accuracy by ~3pp.
-        _paper_eval_split = "test" if "test" in formatted_dataset else "validation"
-        raw_eval_for_paper_acc = [
-            {"prompt":      ex["prompt"],
-             "all_choices": list(ex["all_choices"]),
-             "answer_idx":  int(ex["answer_idx"])}
-            for ex in formatted_dataset[_paper_eval_split]
-        ]
-        accelerator.print(
-            f"Captured {len(raw_eval_for_paper_acc)} raw eval examples "
-            f"for paper-style per-candidate accuracy "
-            f"(from '{_paper_eval_split}' split)"
-        )
-
-        # Compute answer_start per example for label-masking in tokenise step.
-        # CRITICAL: must use the SAME max_length as tokenize_function below,
-        # otherwise answer_start can index past the truncated input_ids and
-        # the loss mask is silently wrong.
-        def add_answer_start(example):
-            prompt_tok = tokenizer(example["prompt"], truncation=True,
-                                   max_length=max_seq_len)
-            return {"answer_start": len(prompt_tok["input_ids"])}
-        with accelerator.main_process_first():
-            formatted_dataset = formatted_dataset.map(
-                add_answer_start,
-                remove_columns=[c for c in formatted_dataset["train"].column_names
-                                if c not in ("formatted_text",)],
-            )
     else:
-        dataset_name = dataset_config.get('name', 'mteb/banking77')
-        text_col = dataset_config.get('text_column', 'text')
-        label_col = dataset_config.get('label_column', 'label')
-
-        accelerator.print(f"Loading dataset {dataset_name}...")
-        dataset = load_dataset(dataset_name, trust_remote_code=True)
-
-        # Robustly get/convert label to string
-        has_label_text = "label_text" in dataset["train"].column_names
-        label_names = None
-        if not has_label_text:
-            feature = dataset["train"].features[label_col]
-            if hasattr(feature, "names"):
-                label_names = feature.names
-        # 1. Format the dataset into "User: <text>\nAssistant: <label_name>"
-        def format_example(example):
-            text = example[text_col]
-            # Robust label selection
-            if has_label_text:
-                label = str(example["label_text"])
-            elif label_names is not None:
-                label = str(label_names[example[label_col]])
-            else:
-                label = str(example[label_col])
-
-            prompt = f"User: {text}\nAssistant:"
-            answer = f" {label}"
-
-            full_text = prompt + answer
-
-            # Tokenize the prompt to find where the assistant's answer starts.
-            # Use the unified max_seq_len so it matches tokenize_function.
-            prompt_tokenized = tokenizer(prompt, truncation=True, max_length=max_seq_len)
-            answer_start = len(prompt_tokenized["input_ids"])
-
-            return {
-                "formatted_text": full_text,
-                "answer_start": answer_start
-            }
-
-        accelerator.print("Formatting dataset into conversational templates...")
-        with accelerator.main_process_first():
-            formatted_dataset = dataset.map(format_example, remove_columns=dataset["train"].column_names)
-        
-    # 2. Tokenize the formatted text
-    def tokenize_function(examples):
-        # Same max_length as the answer_start tokenisation so labels line up.
-        tokenized = tokenizer(examples["formatted_text"], truncation=True,
-                              max_length=max_seq_len)
-        tokenized["answer_start"] = examples["answer_start"]
-        return tokenized
-        
-    with accelerator.main_process_first():
-        tokenized_datasets = formatted_dataset.map(
-            tokenize_function, 
-            batched=True, 
-            remove_columns=["formatted_text"]
-        )
-        
-    # 3. Add labels and mask the prompt tokens with -100
-    def add_labels(example):
-        input_ids = example["input_ids"]
-        labels = list(input_ids)
-        answer_start = example["answer_start"]
-        for i in range(min(answer_start, len(labels))):
-            labels[i] = -100
-        # Remove answer_start as it's no longer needed
-        return {"labels": labels}
-        
-    with accelerator.main_process_first():
-        tokenized_datasets = tokenized_datasets.map(add_labels, remove_columns=["answer_start"])
-        tokenized_datasets.set_format("torch")
-        
-        # Dynamically split 'train' to create a validation split if not present (to leave 'test' untouched for final evaluation!)
-        if "test" in tokenized_datasets and "validation" not in tokenized_datasets:
-            accelerator.print("Splitting training set to create a dynamic 'validation' split (10%)...")
-            split_dataset = tokenized_datasets["train"].train_test_split(test_size=0.1, seed=seed)
-            tokenized_datasets = DatasetDict({
-                "train": split_dataset["train"],
-                "validation": split_dataset["test"],
-                "test": tokenized_datasets["test"]
-            })
-            
-    # Load model — from local checkpoint when resuming, otherwise from HF Hub.
-    # Honour config.model.dtype ("float16" / "bfloat16" / "float32") if set, so
-    # OPT-1.3B / OPT-13B paper-reproduction configs actually run in fp16 instead
-    # of the default float32.
-    _ckpt_dir = "last_checkpoint_causal"
-    _model_src = _ckpt_dir if (resume_state and os.path.exists(_ckpt_dir)) else model_name
-    accelerator.print(f"Loading model from: {_model_src}")
-    _dtype_map = {"float16": torch.float16, "fp16": torch.float16,
-                  "bfloat16": torch.bfloat16, "bf16": torch.bfloat16,
-                  "float32": torch.float32, "fp32": torch.float32}
-    _from_pretrained_kwargs = {"trust_remote_code": True}
-    # transformers 5.x + torch < 2.6 refuses .bin files (CVE-2025-32434);
-    # force safetensors which doesn't go through torch.load.
-    _from_pretrained_kwargs["use_safetensors"] = bool(
-        model_config.get('use_safetensors', True))
-    _dtype_str = model_config.get('dtype')
-    if _dtype_str:
-        if _dtype_str not in _dtype_map:
-            raise ValueError(f"Unknown model.dtype '{_dtype_str}'. "
-                             f"Known: {sorted(_dtype_map)}")
-        _from_pretrained_kwargs["torch_dtype"] = _dtype_map[_dtype_str]
-        accelerator.print(f"Loading model in {_dtype_str}")
-    model = AutoModelForCausalLM.from_pretrained(_model_src, **_from_pretrained_kwargs)
+        model = AutoModelForCausalLM.from_pretrained(
+            weights_src, trust_remote_code=True, torch_dtype=model_dtype,
+        ).to(device)
     model.config.pad_token_id = tokenizer.pad_token_id
-    
-    # Use DataCollatorForSeq2Seq which handles dynamic padding of inputs and pads labels with -100
-    data_collator = DataCollatorForSeq2Seq(tokenizer=tokenizer, model=model, padding=True)
-    
-    train_dataloader = DataLoader(tokenized_datasets["train"], shuffle=True, batch_size=batch_size, collate_fn=data_collator)
-    if "validation" in tokenized_datasets:
-        eval_dataloader = DataLoader(tokenized_datasets["validation"], batch_size=batch_size, collate_fn=data_collator)
+    # ZO assumes no dropout noise in the gradient estimate; FO trains with
+    # dropout enabled like a normal first-order fine-tune.
+    if is_first_order:
+        model.train()
     else:
-        eval_dataloader = None
-        
-    if "test" in tokenized_datasets:
-        test_dataloader = DataLoader(tokenized_datasets["test"], batch_size=batch_size, collate_fn=data_collator)
-    else:
-        test_dataloader = None
-        
-    # Optional: freezing the model backbone is removed. Model must be fully trainable.
-    accelerator.print("Model is fully trainable.")
+        model.eval()
 
-    # STABLE PARAMETER ID INJECTION:
-    # Inject a deterministic param_id into the parameter objects themselves
-    # before passing them to the optimizer. This guarantees that `lozo.py` 
-    # uses perfectly synchronized random seeds across all GPUs, regardless of 
-    # how Accelerate/DDP wraps or reorders the parameters internally.
+    # Param-id + param-name injection.
+    # - param_id keeps per-param RNG seeds in lock-step across ranks (LOZO,
+    #   HiZOO, ZO-Muon, etc. seed each param's generator from this).
+    # - param_name lets methods that key state by parameter name (DiZO's Q/V
+    #   detection, SubZero's per-layer U/V dict, PseuZO's parameter list)
+    #   work with the closure-only optimizer interface — they can read
+    #   `p.param_name` instead of needing `named_parameters()`.
     for i, (name, p) in enumerate(model.named_parameters()):
         if p.requires_grad:
-            p.param_id = i
+            p.param_id   = i
             p.param_name = name
 
-    # Print a few examples to verify formatting and masking
-    if accelerator.is_local_main_process:
-        accelerator.print("\n=== Sample Tokenized Generative Inputs ===")
-        for i in range(2):
-            sample = tokenized_datasets["train"][i]
-            input_ids = sample["input_ids"]
-            labels = sample["labels"]
-            
-            # Reconstruct what the model is trained to predict vs what is masked
-            decoded_input = tokenizer.decode(input_ids)
-            decoded_target = tokenizer.decode([t for t in labels if t != -100])
-            
-            accelerator.print(f"Example {i+1}:")
-            accelerator.print(f"  Decoded Input: {decoded_input}")
-            accelerator.print(f"  Target Prediction (Unmasked): {decoded_target}")
-            accelerator.print(f"  Masked Label IDs: {labels.tolist()[:30]}...\n")
-        accelerator.print("==========================================\n")
-        
-    opt_name = opt_config.get('name', 'LOZO')
-    opt_kwargs = opt_config.get('kwargs', {})
-    
-    is_zeroth_order = opt_name in [
-        "LOZO", "LOZOM", "SparseMeZO", "DiZO", "MeZO", "HiZOO",
-        "ConMeZO", "FZOO", "ZOMuon", "SubZero", "PseuZO",
-    ]
+    # ---- Tokenize train + build loader -----------------------------------
+    train_packs = [spec.format_train(ex, tokenizer) for ex in ds["train"]]
+    train_loader = DataLoader(
+        train_packs, batch_size=batch_size, shuffle=True,
+        collate_fn=lambda b: pad_collate(b, tokenizer.pad_token_id),
+    )
 
-    if is_zeroth_order:
-        model.to(accelerator.device)
-        if opt_name == "LOZOM":
-            optimizer = LOZOM(model.parameters(), **opt_kwargs)
-        elif opt_name == "SparseMeZO":
-            optimizer = SparseMeZO(model.parameters(), **opt_kwargs)
-        elif opt_name == "DiZO":
-            optimizer = DiZO(model.parameters(), **opt_kwargs)
-        elif opt_name == "MeZO":
-            optimizer = MeZO(model.parameters(), **opt_kwargs)
-        elif opt_name == "HiZOO":
-            optimizer = HiZOO(model.parameters(), **opt_kwargs)
-        elif opt_name == "ConMeZO":
-            optimizer = ConMeZO(model.parameters(), **opt_kwargs)
-        elif opt_name == "FZOO":
-            optimizer = FZOO(model.parameters(), **opt_kwargs)
-        elif opt_name == "ZOMuon":
-            optimizer = ZOMuon(model.parameters(), **opt_kwargs)
-        elif opt_name in ["SubZero", "PseuZO", "LOZO"]:
-            # These methods use a standard first-order optimizer under the hood.
-            # We instantiate standard SGD or Adam depending on configuration
-            fo_name = opt_kwargs.get('first_order_name', 'SGD')
-            
-            # Clean up kwargs to only pass standard first-order arguments to SGD/Adam
-            fo_kwargs = {
-                'lr': float(opt_kwargs.get('lr', 1e-7)),
-                'weight_decay': float(opt_kwargs.get('weight_decay', 0.0))
-            }
-            if fo_name == 'SGD' and 'momentum' in opt_kwargs:
-                fo_kwargs['momentum'] = float(opt_kwargs['momentum'])
-            
-            opt_class = getattr(torch.optim, fo_name)
-            optimizer = opt_class(model.parameters(), **fo_kwargs)
-        else:
-            optimizer = LOZO(model.parameters(), **opt_kwargs)
+    # ---- Optimizer --------------------------------------------------------
+    optimizer = opt_cls(
+        (p for p in model.parameters() if p.requires_grad),
+        **opt_kwargs,
+    )
+    print(f"[Opt] {opt_name}({opt_kwargs})  "
+          f"{'(first-order, backprop)' if is_first_order else '(zeroth-order, closure)'}")
 
-        _opt_state_path = "last_checkpoint_causal/optimizer_state.pt"
-        if resume_state and os.path.exists(_opt_state_path):
-            accelerator.print("Loading ZO optimizer state for resume...")
+    # ---- Resume optimizer state (best-effort) ----------------------------
+    if args.resume_from:
+        opt_state_path = Path(args.resume_from) / "optimizer.pt"
+        if opt_state_path.exists():
             try:
-                optimizer.load_state_dict(
-                    torch.load(_opt_state_path, map_location=accelerator.device, weights_only=False)
-                )
+                optimizer.load_state_dict(torch.load(opt_state_path, weights_only=False))
+                print(f"[Resume] loaded optimizer state from {opt_state_path}")
             except Exception as e:
-                accelerator.print(f"Warning: Could not load optimizer state ({e}).")
-                accelerator.print(f"Syncing optimizer step count from global_step ({resume_state['global_step']}) instead.")
-                for group in optimizer.param_groups:
-                    for p in group['params']:
-                        optimizer.state[p]['step'] = resume_state['global_step']
-
-        optimizer, train_dataloader = accelerator.prepare(optimizer, train_dataloader)
-        if eval_dataloader:
-            eval_dataloader = accelerator.prepare(eval_dataloader)
-        if test_dataloader:
-            test_dataloader = accelerator.prepare(test_dataloader)
-            
-        # Scheduler setup (Optional)
-        lr_scheduler = None
-        if 'lr_scheduler' in train_config:
-            scheduler_config = train_config.get('lr_scheduler', {})
-            scheduler_type = scheduler_config.get('type', 'linear')
-            warmup_ratio = scheduler_config.get('warmup_ratio', 0.0)
-            warmup_steps = scheduler_config.get('warmup_steps', 0)
-            start_lr = scheduler_config.get('start_lr', 0.0)
-            
-            if max_tokens is not None:
-                # Estimate steps if max_tokens is used (approximation)
-                avg_tokens_per_batch = 128 
-                num_training_steps = max_tokens // (avg_tokens_per_batch * accelerator.num_processes)
-            else:
-                num_training_steps = len(train_dataloader) * epochs
-                
-            if warmup_steps == 0 and warmup_ratio > 0:
-                num_warmup_steps = int(num_training_steps * warmup_ratio)
-            else:
-                num_warmup_steps = warmup_steps
-    
-            if start_lr > 0:
-                peak_lr = opt_config.get('kwargs', {}).get('lr', 1e-6)
-                def lr_lambda(current_step):
-                    if current_step < num_warmup_steps:
-                        return (start_lr + (peak_lr - start_lr) * float(current_step) / float(max(1, num_warmup_steps))) / peak_lr
-                    if scheduler_type == "linear":
-                        return max(0.0, float(num_training_steps - current_step) / float(max(1, num_training_steps - num_warmup_steps)))
-                    elif scheduler_type == "cosine":
-                        progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
-                        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
-                    return 1.0
-                lr_scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
-            else:
-                lr_scheduler = get_scheduler(
-                    name=scheduler_type,
-                    optimizer=optimizer,
-                    num_warmup_steps=num_warmup_steps,
-                    num_training_steps=num_training_steps,
-                )
-            lr_scheduler = accelerator.prepare(lr_scheduler)
-
-        # Initialize Exact Method Helpers if applicable
-        subzero_helper = None
-        pzo_helper = None
-        lozo_helper = None
-        if opt_name == "SubZero":
-            class ArgsObj:
-                def __init__(self, opt_cfg):
-                    kwargs = opt_cfg.get('kwargs', {})
-                    self.zo_eps = float(kwargs.get('zo_eps', 1e-3))
-                    self.gauss_rank = int(kwargs.get('gauss_rank', 8))
-                    self.update_interval = int(kwargs.get('update_interval', 2000))
-                    self.mode = kwargs.get('mode', 'ft')
-                    self.perturbation_mode = kwargs.get('perturbation_mode', 'two_side')
-                    self.q = int(kwargs.get('q', 1))
-                    self.gradient_accumulation_steps = 1
-            subzero_helper = SubZeroTrainerHelper(ArgsObj(opt_config), optimizer, lr_scheduler)
-        elif opt_name == "PseuZO":
-            class ArgsObj:
-                def __init__(self, opt_cfg):
-                    kwargs = opt_cfg.get('kwargs', {})
-                    self.zo_eps = float(kwargs.get('zo_eps', 1e-3))
-                    self.weight_decay = float(kwargs.get('weight_decay', 0.0))
-            pzo_helper = PZOTrainerHelper(ArgsObj(opt_config), optimizer, lr_scheduler)
-            pzo_helper.reset_momentum_fb(float(opt_config.get('kwargs', {}).get('momentum_fb', 0.9)))
-        elif opt_name == "LOZO":
-            class ArgsObj:
-                def __init__(self, opt_cfg):
-                    kwargs = opt_cfg.get('kwargs', {})
-                    self.zo_eps = float(kwargs.get('eps', 1e-3))
-                    self.rank_r = int(kwargs.get('r', 4))
-                    self.step_interval = int(kwargs.get('nu', 50))
-                    self.weight_decay = float(kwargs.get('weight_decay', 0.0))
-                    self.gradient_accumulation_steps = 1
-            lozo_helper = LOZOTrainerHelper(ArgsObj(opt_config), optimizer, lr_scheduler)
-    else:
-        # Standard first-order optimizer
-        if hasattr(torch.optim, opt_name):
-            opt_class = getattr(torch.optim, opt_name)
-            optimizer = opt_class(model.parameters(), **opt_kwargs)
+                print(f"[Resume] could not load optimizer state ({e}); continuing fresh")
         else:
-            raise ValueError(f"Optimizer {opt_name} not found in torch.optim or custom definitions.")
+            print(f"[Resume] no optimizer.pt at {opt_state_path}; "
+                  "ZO RNG seeds will re-derive from global_step")
 
-        _opt_state_path = "last_checkpoint_causal/optimizer_state.pt"
-        if resume_state and os.path.exists(_opt_state_path):
-            accelerator.print("Loading FO optimizer state for resume...")
-            try:
-                optimizer.load_state_dict(
-                    torch.load(_opt_state_path, map_location=accelerator.device, weights_only=False)
+    # ---- Budget bookkeeping ----------------------------------------------
+    steps_per_epoch = max(1, math.ceil(len(train_packs) / batch_size))
+    total_epochs    = max_steps / steps_per_epoch
+    print(f"[Budget] num_train={len(train_packs)}  batch_size={batch_size}  "
+          f"steps_per_epoch={steps_per_epoch}  max_steps={max_steps}  "
+          f"≈ {total_epochs:.1f} epochs (~{total_epochs:.0f} passes per datapoint)")
+    wandb.run.summary["steps_per_epoch"]      = steps_per_epoch
+    wandb.run.summary["planned_epochs"]       = total_epochs
+    wandb.run.summary["passes_per_datapoint"] = total_epochs
+
+    # ---- Checkpoint dirs --------------------------------------------------
+    run_ckpt_dir = Path(args.ckpt_dir) / run_name
+    best_dir     = run_ckpt_dir / "best"
+    last_dir     = run_ckpt_dir / "last"
+    print(f"[Ckpt] best -> {best_dir}   last -> {last_dir}")
+
+    # ---- Training loop ----------------------------------------------------
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+    step_times          = []
+    train_iter          = iter(train_loader)
+    nan_seen            = False
+    run_start_time      = time.perf_counter()
+
+    # Resume counters from disk if we have them.
+    global_step         = int(resume_meta["total_steps"])    if resume_meta else 0
+    total_forwards      = int(resume_meta["total_forwards"]) if resume_meta else 0
+    best = {
+        "logit_accuracy": -1.0, "token_accuracy": 0.0,
+        "at_step":  0, "at_forwards": 0, "at_time_sec": 0.0,
+    }
+    if resume_meta and isinstance(resume_meta.get("best"), dict):
+        best.update(resume_meta["best"])
+    if global_step >= max_steps:
+        print(f"[Resume] global_step {global_step} already >= max_steps {max_steps}; "
+              "nothing to do.")
+    last_eval = None  # final eval metrics (for the [Done] summary)
+
+    while global_step < max_steps:
+        # ---- Epoch Hooks ----
+        if global_step % steps_per_epoch == 0 and opt_name == "PseuZO":
+            epoch_idx = global_step // steps_per_epoch
+            if hasattr(optimizer, "on_epoch_start"):
+                optimizer.on_epoch_start(epoch_idx, math.ceil(total_epochs))
+
+        try:
+            batch = next(train_iter)
+        except StopIteration:
+            train_iter = iter(train_loader)
+            batch = next(train_iter)
+        batch = {k: v.to(device) for k, v in batch.items()}
+
+        step_loss     = {"v": None}
+        step_forwards = {"n": 0}
+
+        # Closure protocol:
+        #   closure()                       → returns loss tensor (cheap, no-grad)
+        #   closure(need_output=True)       → returns (loss, last_hidden, ∂L/∂last_hidden)
+        # The second form is what PseuZO needs (Jacobian-via-output). All other
+        # methods just call the first form. Each call increments the forward
+        # counter so we can plot apples-to-apples accuracy-vs-forwards.
+        def closure(need_output: bool = False):
+            step_forwards["n"] += 1
+            if not need_output:
+                out = model(
+                    input_ids=batch["input_ids"],
+                    attention_mask=batch["attention_mask"],
+                    labels=batch["labels"],
                 )
-            except Exception as e:
-                accelerator.print(f"Warning: Could not load FO optimizer state ({e}).")
+                step_loss["v"] = out.loss.detach()
+                return out.loss
+            # Enriched path: cheap forward up to last hidden state, then a
+            # tiny lm_head + CE with grad on JUST the hidden state. Main
+            # model parameters never see autograd.
+            with torch.no_grad():
+                base_out = model(
+                    input_ids=batch["input_ids"],
+                    attention_mask=batch["attention_mask"],
+                    output_hidden_states=True,
+                )
+            last_hidden = base_out.hidden_states[-1].detach().requires_grad_(True)
+            lm_head = getattr(model, "lm_head", None) or model.get_output_embeddings()
+            with torch.enable_grad():
+                logits = lm_head(last_hidden)
+                shift_logits = logits[..., :-1, :].contiguous()
+                shift_labels = batch["labels"][..., 1:].contiguous()
+                loss_t = F.cross_entropy(
+                    shift_logits.view(-1, shift_logits.size(-1)),
+                    shift_labels.view(-1),
+                    ignore_index=-100,
+                )
+                loss_t.backward()
+            step_loss["v"] = loss_t.detach()
+            return loss_t.detach(), last_hidden.detach(), last_hidden.grad.detach()
 
-        model, optimizer, train_dataloader = accelerator.prepare(model, optimizer, train_dataloader)
-        if eval_dataloader:
-            eval_dataloader = accelerator.prepare(eval_dataloader)
-        if test_dataloader:
-            test_dataloader = accelerator.prepare(test_dataloader)
-            
-    # Optional LR scheduler (cosine with linear warmup). Configured via YAML.
-    sched_cfg = config.get('scheduler', {}) or {}
-    scheduler = None
-    if sched_cfg.get('type') == 'cosine':
-        from torch.optim.lr_scheduler import LambdaLR
-        steps_per_epoch = len(train_dataloader)
-        warmup_steps   = int(sched_cfg.get('warmup_steps', 0))
-        t_max_epochs   = int(sched_cfg.get('t_max_epochs', epochs))
-        t_max_steps    = max(1, t_max_epochs * steps_per_epoch)
-        eta_min_ratio  = float(sched_cfg.get('eta_min_ratio', 0.0))
+        t0 = time.perf_counter()
+        if is_first_order:
+            # Standard backprop training step. `closure` isn't used by FO
+            # optimizers — we just call the model directly so the loss is in
+            # the autograd graph. step_loss + step_forwards are populated
+            # manually to keep the wandb log shape identical to ZO runs.
+            optimizer.zero_grad(set_to_none=True)
+            out = model(
+                input_ids=batch["input_ids"],
+                attention_mask=batch["attention_mask"],
+                labels=batch["labels"],
+            )
+            loss_t = out.loss
+            loss_t.backward()
+            optimizer.step()
+            step_loss["v"]     = loss_t.detach()
+            step_forwards["n"] = 1
+        else:
+            optimizer.step(closure)
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        dt = time.perf_counter() - t0
+        step_times.append(dt)
+        global_step    += 1
+        total_forwards += step_forwards["n"]
 
-        def lr_lambda(step):
-            if step < warmup_steps:
-                return float(step + 1) / float(max(1, warmup_steps))
-            progress = (step - warmup_steps) / float(max(1, t_max_steps - warmup_steps))
-            progress = min(1.0, progress)
-            return eta_min_ratio + (1.0 - eta_min_ratio) * 0.5 * (1.0 + math.cos(math.pi * progress))
+        loss_val = float(step_loss["v"].item()) if step_loss["v"] is not None else 0.0
 
-        scheduler = LambdaLR(optimizer, lr_lambda, last_epoch=-1)
-        accelerator.print(
-            f"[Scheduler] cosine | warmup={warmup_steps} | t_max_steps={t_max_steps} "
-            f"({t_max_epochs} epochs) | eta_min_ratio={eta_min_ratio}"
+        # ---- NaN / inf guard: ZO often dies silently on bad LR ----
+        if not math.isfinite(loss_val):
+            nan_seen = True
+            print(f"[NaN] non-finite loss at step {global_step} (loss={loss_val}). Aborting.")
+            wandb.log({"train/nan_step": global_step, "train/loss_nonfinite": loss_val},
+                      step=global_step)
+            break
+
+        log = {
+            "train/loss":               loss_val,
+            "train/step_time_sec":      dt,
+            "train/avg_step_time_sec":  sum(step_times) / len(step_times),
+            "train/step":               global_step,
+            "train/epoch":              global_step / steps_per_epoch,
+            "train/datapoints_seen":    global_step * batch_size,
+            "train/forwards_this_step": step_forwards["n"],
+            "train/total_forwards":     total_forwards,
+        }
+        if torch.cuda.is_available():
+            log["mem/current_MB"] = torch.cuda.memory_allocated()     / 1024**2
+            log["mem/peak_MB"]    = torch.cuda.max_memory_allocated() / 1024**2
+
+        # ---- Drain optimizer diagnostics (opt-in) ----
+        opt_metrics = getattr(optimizer, "last_metrics", None)
+        if isinstance(opt_metrics, dict):
+            for k, v in opt_metrics.items():
+                # accept python scalars and 0-d tensors
+                if hasattr(v, "item"):
+                    v = v.item()
+                log[f"opt/{k}"] = v
+
+        wandb.log(log, step=global_step)
+
+        if global_step % 50 == 0:
+            print(f"  step {global_step:5d}  loss={loss_val:.4f}  "
+                  f"sec/step={dt:.3f}  fwds/step={step_forwards['n']}  "
+                  f"peak_mem={log.get('mem/peak_MB', 0):.0f}MB")
+
+        # ---- Periodic eval ----
+        if global_step % eval_steps == 0 or global_step == max_steps:
+            ev = evaluate(model, tokenizer, val_examples, spec, device,
+                          eval_batch_size=args.eval_batch_size)
+            ev["train/step"] = global_step
+            wandb.log(ev, step=global_step)
+            last_eval = ev
+            print(f"  [eval @ step {global_step}] "
+                  f"logit_acc={ev['eval/logit_accuracy']:.4f}  "
+                  f"token_acc={ev['eval/token_accuracy']:.4f}")
+
+            # Best tracker + best ckpt save on improvement
+            if ev["eval/logit_accuracy"] > best["logit_accuracy"]:
+                best["logit_accuracy"] = ev["eval/logit_accuracy"]
+                best["token_accuracy"] = ev["eval/token_accuracy"]
+                best["at_step"]        = global_step
+                best["at_forwards"]    = total_forwards
+                best["at_time_sec"]    = time.perf_counter() - run_start_time
+                best_meta = {
+                    "best":           dict(best),
+                    "total_steps":    global_step,
+                    "total_forwards": total_forwards,
+                    "run_name":       run_name,
+                    "wandb_run_id":   wandb.run.id,
+                    "task":           args.task,
+                    "opt_name":       opt_name,
+                    "owner":          owner,
+                    "git_sha":        _git_sha(),
+                }
+                save_checkpoint(model, tokenizer, optimizer, best_dir,
+                                best_meta, source_cfg_path=args.config)
+                wandb.log({
+                    "best_eval/logit_accuracy": best["logit_accuracy"],
+                    "best_eval/token_accuracy": best["token_accuracy"],
+                    "best_eval/at_step":        best["at_step"],
+                    "best_eval/at_forwards":    best["at_forwards"],
+                    "best_eval/at_time_sec":    best["at_time_sec"],
+                }, step=global_step)
+                print(f"  [best] new best logit_acc={best['logit_accuracy']:.4f} "
+                      f"(saved -> {best_dir})")
+
+            # Restore mode for the next training step
+            if is_first_order:
+                model.train()
+            else:
+                model.eval()
+
+    # ---- Save LAST checkpoint -----------------------------------------------
+    final_meta = {
+        "total_steps":    global_step,
+        "total_forwards": total_forwards,
+        "wall_time_sec":  time.perf_counter() - run_start_time,
+        "nan_aborted":    nan_seen,
+        "best":           dict(best),
+        "run_name":       run_name,
+        "wandb_run_id":   wandb.run.id,
+        "task":           args.task,
+        "opt_name":       opt_name,
+        "owner":          owner,
+        "git_sha":        _git_sha(),
+    }
+    save_checkpoint(model, tokenizer, optimizer, last_dir,
+                    final_meta, source_cfg_path=args.config)
+
+    # ---- HF Hub: push best + last ONCE, only at end of training ----
+    # Doing this here (instead of on every new best) means the run isn't
+    # blocked by Hub network latency mid-training and we only pay one push
+    # round-trip per checkpoint. The startup assertion already proved the
+    # token is writable, so this is unlikely to fail.
+    if push_to_hub:
+        if best_dir.exists():
+            _hub_push_folder(
+                folder=best_dir,
+                repo_id=hub_repo_id,
+                sub_path=f"{run_name}/best",
+                commit_message=(f"best ckpt {run_name} step={best['at_step']} "
+                                f"logit_acc={best['logit_accuracy']:.4f}"),
+            )
+        _hub_push_folder(
+            folder=last_dir,
+            repo_id=hub_repo_id,
+            sub_path=f"{run_name}/last",
+            commit_message=f"last ckpt {run_name} step={global_step}",
         )
 
-        _sched_state_path = "last_checkpoint_causal/scheduler_state.pt"
-        if resume_state and os.path.exists(_sched_state_path):
-            accelerator.print("Loading scheduler state for resume...")
-            scheduler.load_state_dict(torch.load(_sched_state_path, weights_only=False))
+    # ---- Final summary ------------------------------------------------------
+    total_time = time.perf_counter() - run_start_time
+    summary = {
+        "final/total_steps":       global_step,
+        "final/total_forwards":    total_forwards,
+        "final/avg_step_time_sec": (sum(step_times) / len(step_times)) if step_times else 0.0,
+        "final/total_time_sec":    total_time,
+        "final/nan_aborted":       nan_seen,
+    }
+    if torch.cuda.is_available():
+        summary["final/peak_mem_MB"] = torch.cuda.max_memory_allocated() / 1024**2
+    if last_eval is not None:
+        summary["final/eval_logit_accuracy"] = last_eval["eval/logit_accuracy"]
+        summary["final/eval_token_accuracy"] = last_eval["eval/token_accuracy"]
+    # Mirror best/* into final summary so it's visible in the WandB run table
+    summary["final/best_logit_accuracy"] = best["logit_accuracy"]
+    summary["final/best_token_accuracy"] = best["token_accuracy"]
+    summary["final/best_at_step"]        = best["at_step"]
+    summary["final/best_at_forwards"]    = best["at_forwards"]
+    summary["final/best_at_time_sec"]    = best["at_time_sec"]
 
-    accelerator.print(f"Starting training for {epochs} epochs using {opt_name} optimizer")
-    
-    global_step       = resume_state['global_step']       if resume_state else 0
-    best_eval_loss    = resume_state['best_eval_loss']    if resume_state else float('inf')
-    best_paper_acc    = (resume_state.get('best_paper_acc', -1.0)
-                         if resume_state else -1.0)
-    total_tokens_seen = resume_state['total_tokens_seen'] if resume_state else 0
-    epoch             = resume_state['epoch']             if resume_state else 0
-    run_start_time = time.time()
+    wandb.log(summary, step=global_step)
+    for k, v in summary.items():
+        wandb.run.summary[k] = v
 
-    def run_evaluation(curr_epoch, curr_global_step):
-        nonlocal best_eval_loss, best_paper_acc
-        if not eval_dataloader:
-            return
-        
-        accelerator.print(f"\n--- Starting Evaluation (Epoch {curr_epoch+1}, Step {curr_global_step}) ---")
-        model.eval()
-        total_eval_loss = 0
-        correct_tokens = 0
-        total_tokens = 0
-        eval_unwrapped_model = accelerator.unwrap_model(model)
-        with torch.no_grad():
-            for eval_step_idx, batch in enumerate(eval_dataloader):
-                batch = {k: v.to(accelerator.device) for k, v in batch.items()}
-                outputs = eval_unwrapped_model(
-                    input_ids=batch["input_ids"],
-                    attention_mask=batch["attention_mask"],
-                    labels=batch["labels"]
-                )
-                eval_loss = outputs.loss
-                avg_loss = accelerator.reduce(eval_loss.detach(), reduction="mean")
-                total_eval_loss += avg_loss.item()
-                
-                # Compute token-level accuracy
-                shift_logits = outputs.logits[..., :-1, :].contiguous()
-                shift_labels = batch["labels"][..., 1:].contiguous()
-                predictions = shift_logits.argmax(dim=-1)
-                
-                local_mask = (shift_labels != -100)
-                local_correct = (predictions[local_mask] == shift_labels[local_mask]).sum().to(accelerator.device)
-                local_total = local_mask.sum().to(accelerator.device)
-                
-                batch_correct = accelerator.reduce(local_correct, reduction="sum")
-                batch_total = accelerator.reduce(local_total, reduction="sum")
-                
-                correct_tokens += batch_correct.item()
-                total_tokens += batch_total.item()
-                    
-        avg_eval_loss = total_eval_loss / len(eval_dataloader)
-        perplexity = math.exp(avg_eval_loss) if avg_eval_loss < 20 else float('inf')
-        token_acc = correct_tokens / total_tokens if total_tokens > 0 else 0.0
-        elapsed_since_start = time.time() - run_start_time
+    print()
+    print("=" * 72)
+    print(f"[Done] {run_name}")
+    print(f"  BEST   logit_acc={best['logit_accuracy']:.4f}  "
+          f"token_acc={best['token_accuracy']:.4f}")
+    print(f"         reached at step {best['at_step']} / "
+          f"forwards {best['at_forwards']} / wall {best['at_time_sec']:.1f}s")
+    if last_eval is not None:
+        print(f"  FINAL  logit_acc={last_eval['eval/logit_accuracy']:.4f}  "
+              f"token_acc={last_eval['eval/token_accuracy']:.4f}")
+    print(f"  TOTAL  {global_step} steps / {total_forwards} forwards / "
+          f"{total_time:.1f}s wall / peak {summary.get('final/peak_mem_MB', 0):.0f}MB")
+    if nan_seen:
+        print("  WARN   run aborted on non-finite loss.")
+    print(f"  CKPTS  best -> {best_dir}")
+    print(f"         last -> {last_dir}")
+    print("=" * 72)
 
-        # Paper-style per-candidate LL eval (MeZO/ConMeZO/FZOO/ZO-Muon
-        # publish numbers under this metric, NOT per-token argmax). Cheap:
-        # ~3s on a 1000-example eval set with OPT-1.3B on a 4090.
-        paper_acc = None
-        if raw_eval_for_paper_acc is not None and accelerator.is_local_main_process:
-            paper_acc = _compute_paper_acc(
-                eval_unwrapped_model, tokenizer,
-                raw_eval_for_paper_acc, accelerator.device
-            )
+    wandb.finish()
 
-        log_dict = {
-            "eval_loss": avg_eval_loss,
-            "perplexity": perplexity,
-            "eval_token_accuracy": token_acc,
-            "total_elapsed_time_sec": elapsed_since_start,
-            "epoch": curr_epoch+1
-        }
-        if paper_acc is not None:
-            log_dict["paper_acc"] = paper_acc
-
-        msg = (f"Eval: Epoch {curr_epoch+1} | Step {curr_global_step} | "
-               f"Loss: {avg_eval_loss:.4f} | Perplexity: {perplexity:.2f} | "
-               f"Token Accuracy: {token_acc:.4f}")
-        if paper_acc is not None:
-            msg += f" | Paper-Acc: {paper_acc*100:.2f}%"
-        accelerator.print(msg)
-        accelerator.log(log_dict, step=curr_global_step)
-
-        if accelerator.is_local_main_process:
-            accelerator.print("Saving checkpoints on main process...")
-            unwrapped_model = accelerator.unwrap_model(model)
-            # Save best by paper accuracy when available; fall back to lowest
-            # eval loss for the legacy chat-template path.
-            if paper_acc is not None:
-                improved = paper_acc > best_paper_acc
-                metric_name = "paper_acc"
-                metric_value = paper_acc
-                if improved:
-                    best_paper_acc = paper_acc
-            else:
-                improved = avg_eval_loss < best_eval_loss
-                metric_name = "loss"
-                metric_value = avg_eval_loss
-                if improved:
-                    best_eval_loss = avg_eval_loss
-
-            if improved:
-                accelerator.print(
-                    f"New best {metric_name} ({metric_value:.4f})! "
-                    f"Saving best_checkpoint_causal..."
-                )
-                unwrapped_model.save_pretrained("best_checkpoint_causal")
-                tokenizer.save_pretrained("best_checkpoint_causal")
-                
-                # Push BEST checkpoint to hub immediately
-                if push_to_hub and repo_id:
-                    try:
-                        _api = HfApi()
-                        _api.create_repo(repo_id=repo_id, exist_ok=True)
-                        _api.upload_folder(
-                            folder_path="best_checkpoint_causal",
-                            repo_id=repo_id,
-                            path_in_repo="best_checkpoint_causal",
-                            commit_message=f"New best model: epoch {curr_epoch+1} step {curr_global_step} loss {avg_eval_loss:.4f}",
-                        )
-                        accelerator.print("Best checkpoint pushed to HF Hub.")
-                    except Exception as _e:
-                        accelerator.print(f"Warning: Best checkpoint push failed: {_e}")
-                
-            accelerator.print("Saving last_checkpoint_causal...")
-            unwrapped_model.save_pretrained("last_checkpoint_causal")
-            tokenizer.save_pretrained("last_checkpoint_causal")
-
-            # Persist training state and optimizer state for preemption recovery
-            with open("last_checkpoint_causal/training_state.json", "w") as _sf:
-                json.dump({
-                    "epoch":             curr_epoch + 1,
-                    "global_step":       curr_global_step,
-                    "best_eval_loss":    best_eval_loss,
-                    "best_paper_acc":    best_paper_acc,
-                    "total_tokens_seen": total_tokens_seen,
-                }, _sf)
-            torch.save(optimizer.state_dict(), "last_checkpoint_causal/optimizer_state.pt")
-            if scheduler is not None:
-                torch.save(scheduler.state_dict(), "last_checkpoint_causal/scheduler_state.pt")
-            accelerator.print("Checkpoints saved successfully.")
-
-            if push_to_hub and repo_id:
-                try:
-                    _api = HfApi()
-                    _api.create_repo(repo_id=repo_id, exist_ok=True)
-                    _api.upload_folder(
-                        folder_path="last_checkpoint_causal",
-                        repo_id=repo_id,
-                        path_in_repo="last_checkpoint_causal",
-                        commit_message=f"Resume checkpoint epoch {curr_epoch+1} step {curr_global_step}",
-                    )
-                    accelerator.print(f"Checkpoint pushed to HF Hub.")
-                except Exception as _e:
-                    accelerator.print(f"Warning: HF Hub push failed: {_e}")
-        
-        accelerator.wait_for_everyone()
-        accelerator.print(f"--- Evaluation Complete ---\n")
-
-    while True:
-        # Outer-loop termination: max_steps takes precedence, then max_tokens,
-        # then epoch count. The inner loop applies the same logic per step.
-        if max_steps is not None and global_step >= max_steps:
-            break
-        if max_steps is None and max_tokens is None and epoch >= epochs:
-            break
-            
-        if is_zeroth_order:
-            model.eval() # Disable dropout / stochastic noise for stable zeroth-order updates
-        else:
-            model.train()
-            
-        total_loss = 0
-        progress_bar = tqdm(train_dataloader, disable=not accelerator.is_local_main_process)
-        for batch in progress_bar:
-            step_start_time = time.time()
-            if is_zeroth_order:
-                batch = {k: v.to(accelerator.device) for k, v in batch.items()}
-                
-                debug_print = False
-                if debug_print:
-                    non_masked = (batch["labels"] != -100).sum().item()
-                    total_elem = batch["labels"].numel()
-                    accelerator.print(f"\n[DEBUG Step {global_step}] Batch input_ids: {batch['input_ids'].shape}, Non-masked labels: {non_masked}/{total_elem}")
-
-                unwrapped_model = accelerator.unwrap_model(model)
-                
-                if opt_name == "SubZero":
-                    subzero_helper.state.global_step = global_step
-                    loss = subzero_helper.zo_subspace_step(unwrapped_model, batch)
-                    subzero_helper.zo_subspace_update(unwrapped_model)
-                    loss_val = loss.item() if isinstance(loss, torch.Tensor) else loss
-                    total_loss += loss_val
-                    progress_bar.set_description(f"Epoch {epoch+1} Loss: {loss_val:.4f}")
-                    train_loss_val = loss_val
-                elif opt_name == "PseuZO":
-                    loss = pzo_helper.pzo_step(unwrapped_model, batch)
-                    pzo_helper.pzo_update(unwrapped_model)
-                    loss_val = loss.item() if isinstance(loss, torch.Tensor) else loss
-                    total_loss += loss_val
-                    progress_bar.set_description(f"Epoch {epoch+1} Loss: {loss_val:.4f}")
-                    train_loss_val = loss_val
-                elif opt_name == "LOZO":
-                    loss = lozo_helper.lowrank_zo_step(unwrapped_model, batch)
-                    lozo_helper.lowrank_zo_update()
-                    loss_val = loss.item() if isinstance(loss, torch.Tensor) else loss
-                    total_loss += loss_val
-                    progress_bar.set_description(f"Epoch {epoch+1} Loss: {loss_val:.4f}")
-                    train_loss_val = loss_val
-                else:
-                    step_loss_container = []
-                    def closure():
-                        outputs = unwrapped_model(
-                            input_ids=batch["input_ids"],
-                            attention_mask=batch["attention_mask"],
-                            labels=batch["labels"]
-                        )
-                        loss = outputs.loss
-                        if debug_print:
-                            accelerator.print(f"[DEBUG Step {global_step}] Raw Model loss: {loss.item() if loss is not None else 'None'}")
-                        # Distributed reduction for multi-GPU ZO gradient consistency
-                        avg_loss = accelerator.reduce(loss.detach(), reduction="mean")
-                        if debug_print:
-                            accelerator.print(f"[DEBUG Step {global_step}] Reduced avg_loss: {avg_loss.item() if avg_loss is not None else 'None'}")
-                        step_loss_container.append(avg_loss.item())
-                        return avg_loss
-                        
-                    optimizer.step(closure)
-                    loss = step_loss_container[0] if len(step_loss_container) > 0 else 0.0
-                    total_loss += loss
-                    progress_bar.set_description(f"Epoch {epoch+1} Loss: {loss:.4f}")
-                    train_loss_val = loss
-            else:
-                # First order standard training
-                with accelerator.accumulate(model):
-                    optimizer.zero_grad()
-                    outputs = model(
-                        input_ids=batch["input_ids"],
-                        attention_mask=batch["attention_mask"],
-                        labels=batch["labels"]
-                    )
-                    loss = outputs.loss
-                    accelerator.backward(loss)
-                    optimizer.step()
-                    
-                total_loss += loss.item()
-                progress_bar.set_description(f"Epoch {epoch+1} Loss: {loss.item():.4f}")
-                train_loss_val = loss.item()
-                
-            if lr_scheduler is not None:
-                lr_scheduler.step()
-            step_time = time.time() - step_start_time
-            local_bsz = batch["labels"].size(0)
-            
-            # Real token count throughput
-            step_tokens = batch["attention_mask"].sum().item()
-            step_tokens *= accelerator.num_processes
-            total_tokens_seen += step_tokens
-            
-            samples_per_second = (local_bsz * accelerator.num_processes) / step_time
-            
-            if scheduler is not None:
-                scheduler.step()
-
-            log_metrics = {
-                "train_loss": train_loss_val,
-                "learning_rate": optimizer.param_groups[0]['lr'],
-                "step_time_sec": step_time,
-                "samples_per_second": samples_per_second,
-                "total_tokens_seen": total_tokens_seen,
-                "lr": optimizer.param_groups[0]['lr'],
-            }
-            if torch.cuda.is_available():
-                log_metrics["gpu_memory_MB"] = torch.cuda.max_memory_allocated() / (1024 ** 2)
-
-            accelerator.log(log_metrics, step=global_step)
-            global_step += 1
-
-            # Step-based eval: trigger every eval_steps optimizer steps in
-            # addition to the per-epoch trigger below.
-            if eval_steps is not None and global_step > 0 and global_step % eval_steps == 0:
-                run_evaluation(epoch, global_step)
-                if is_zeroth_order:
-                    model.eval()
-                else:
-                    model.train()
-
-            if max_steps is not None and global_step >= max_steps:
-                accelerator.print(f"Reached max_steps ({max_steps}). Stopping training loop.")
-                break
-
-            if max_tokens is not None and total_tokens_seen >= max_tokens:
-                accelerator.print(f"Reached max_tokens ({max_tokens}). Stopping training loop.")
-                break
-                
-        avg_train_loss = total_loss / (len(train_dataloader) if len(train_dataloader) > 0 else 1)
-        accelerator.print(f"Epoch {epoch+1} finished. Avg train loss: {avg_train_loss:.4f} | Total tokens seen: {total_tokens_seen}")
-        
-        if (epoch + 1) % eval_epochs == 0:
-            run_evaluation(epoch, global_step)
-
-        epoch += 1
-        # This condition is now redundant as max_tokens logic is handled per batch step
-        # if max_tokens is not None and total_tokens_seen >= max_tokens:
-        #     break
-            
-    total_run_time = time.time() - run_start_time
-    accelerator.print(f"Training completed in {total_run_time:.2f} seconds.")
-    accelerator.log({"final_total_time_sec": total_run_time}, step=global_step)
-    
-    # Final evaluation on unseen test set
-    if test_dataloader:
-        accelerator.print("\n=== Running Final Evaluation on the Unseen Test Set ===")
-        if os.path.exists("best_checkpoint_causal"):
-            accelerator.print("Loading best causal checkpoint for final test evaluation...")
-            model = AutoModelForCausalLM.from_pretrained("best_checkpoint_causal", trust_remote_code=True).to(accelerator.device)
-            
-        model.eval()
-        total_test_loss = 0
-        correct_tokens = 0
-        total_tokens = 0
-        with torch.no_grad():
-            for batch in test_dataloader:
-                batch = {k: v.to(accelerator.device) for k, v in batch.items()}
-                outputs = model(
-                    input_ids=batch["input_ids"],
-                    attention_mask=batch["attention_mask"],
-                    labels=batch["labels"]
-                )
-                test_loss = outputs.loss
-                avg_loss = accelerator.reduce(test_loss.detach(), reduction="mean")
-                total_test_loss += avg_loss.item()
-                
-                shift_logits = outputs.logits[..., :-1, :].contiguous()
-                shift_labels = batch["labels"][..., 1:].contiguous()
-                predictions = shift_logits.argmax(dim=-1)
-                
-                local_mask = (shift_labels != -100)
-                local_correct = (predictions[local_mask] == shift_labels[local_mask]).sum().to(accelerator.device)
-                local_total = local_mask.sum().to(accelerator.device)
-                
-                batch_correct = accelerator.reduce(local_correct, reduction="sum")
-                batch_total = accelerator.reduce(local_total, reduction="sum")
-                
-                correct_tokens += batch_correct.item()
-                total_tokens += batch_total.item()
-                    
-        avg_test_loss = total_test_loss / len(test_dataloader)
-        test_perplexity = math.exp(avg_test_loss) if avg_test_loss < 20 else float('inf')
-        test_token_acc = correct_tokens / total_tokens if total_tokens > 0 else 0.0
-        
-        accelerator.print(f"Final Test Loss: {avg_test_loss:.4f} | Final Test Perplexity: {test_perplexity:.2f} | Final Test Token Accuracy: {test_token_acc:.4f}")
-        accelerator.log({
-            "test_loss": avg_test_loss,
-            "test_perplexity": test_perplexity,
-            "test_token_accuracy": test_token_acc
-        }, step=global_step)
-        
-    accelerator.wait_for_everyone()
-    
-    if push_to_hub and repo_id and accelerator.is_local_main_process:
-        api = HfApi()
-        accelerator.print(f"Pushing causal checkpoints to Hugging Face Hub: {repo_id}")
-        api.create_repo(repo_id=repo_id, exist_ok=True)
-        
-        if os.path.exists("best_checkpoint_causal"):
-            api.upload_folder(
-                folder_path="best_checkpoint_causal",
-                repo_id=repo_id,
-                path_in_repo="best_checkpoint_causal",
-                commit_message="Upload best causal checkpoint"
-            )
-        if os.path.exists("last_checkpoint_causal"):
-            api.upload_folder(
-                folder_path="last_checkpoint_causal",
-                repo_id=repo_id,
-                path_in_repo="last_checkpoint_causal",
-                commit_message="Upload last causal checkpoint"
-            )
-        accelerator.print("Push complete.")
-        
-    accelerator.end_training()
 
 if __name__ == "__main__":
     main()
