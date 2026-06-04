@@ -3,7 +3,8 @@
 owner: nil
 
 model:
-  name: Qwen/Qwen3.5-0.8B
+  name: Qwen/Qwen2.5-0.5B
+  dtype: float16
 
 training:
   seed: 42
