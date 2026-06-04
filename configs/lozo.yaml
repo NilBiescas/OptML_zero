@@ -4,10 +4,10 @@ owner: nil
 
 model:
   name: Qwen/Qwen2.5-0.5B
-  dtype: float16
+  dtype: bfloat16
 
 training:
-  seed: 42
+  seed: 87
   batch_size: 16
   max_steps: 20000
   eval_steps: 500

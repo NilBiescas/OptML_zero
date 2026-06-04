@@ -6,7 +6,7 @@ owner: nil
 
 model:
   name: Qwen/Qwen2.5-0.5B
-  dtype: float16
+  dtype: bfloat16
 
 training:
   seed: 42
