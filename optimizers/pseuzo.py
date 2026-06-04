@@ -181,8 +181,9 @@ class PseuZO(Optimizer):
         o1 = o1.detach()
 
         # Store grad_last for the update
-        # Original pzo_trainer.py:947 uses grad_last[0] — only first batch element
-        self._grad_last = grad_last[0:1]
+        # self._grad_last = grad_last[0:1]
+        # We preserve the full batch dimension, matching zo_helpers.py
+        self._grad_last = grad_last
 
         # Restore parameters
         self._perturb(trainable, random_seed, scaling_factor=-1, zo_eps=zo_eps)

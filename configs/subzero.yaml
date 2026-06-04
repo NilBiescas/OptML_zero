@@ -1,35 +1,28 @@
-dataset:
-  template: "mezo"
-  task: "multirc"
-  num_train: 1000
-  num_dev: 500
-  num_eval: 1000
+owner: nil
 
 model:
-  name: "Qwen/Qwen2.5-0.5B"
-  dtype: "float16"
+  name: Qwen/Qwen2.5-0.5B
+  dtype: bfloat16
 
 training:
   seed: 42
   batch_size: 16
   max_steps: 20000
   eval_steps: 500
-  eval_epochs: 1000
-  lr_scheduler:
-    type: "constant"
+  num_train: 1000
+  num_eval: 1000
 
 optimizer:
-  name: "SubZero"
+  name: SubZero
   kwargs:
-    lr: 1e-7
-    zo_eps: 1e-3
+    lr: 1e-7            
+    eps: 1e-3
     weight_decay: 0.0
-    gauss_rank: 24
-    update_interval: 1000
-    perturbation_mode: "two_side"
-    mode: "ft"
-    q: 1
+    gauss_rank: 24       
+    update_interval: 1000 
+    perturbation_mode: two_side
+    mode: full
 
 hub:
   push_to_hub: true
-  repo_id: "Nbiescas/zo-subzero-qwen"
+  repo_id: Nbiescas/zo-comparison-qwen

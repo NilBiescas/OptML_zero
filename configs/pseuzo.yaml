@@ -1,31 +1,26 @@
-dataset:
-  template: "mezo"
-  task: "multirc"
-  num_train: 1000
-  num_dev: 500
-  num_eval: 1000
+owner: nil
 
 model:
-  name: "Qwen/Qwen2.5-0.5B"
-  dtype: "float16"
+  name: Qwen/Qwen2.5-0.5B
+  dtype: bfloat16
 
 training:
   seed: 42
   batch_size: 16
   max_steps: 20000
   eval_steps: 500
-  eval_epochs: 1000
-  lr_scheduler:
-    type: "constant"
+  num_train: 1000
+  num_eval: 1000
 
 optimizer:
-  name: "PseuZO"
+  name: PseuZO
   kwargs:
-    lr: 1e-7
-    zo_eps: 1e-3
+    lr: 1e-7              # matches submit_pseuzo.sh LR
+    eps: 1e-3
     weight_decay: 0.0
-    momentum_fb: 0.0
+    sliding_window_length: 14
+    momentum_fb: 0.9
 
 hub:
   push_to_hub: true
-  repo_id: "Nbiescas/zo-pseuzo-qwen"
+  repo_id: Nbiescas/zo-comparison-qwen

@@ -564,19 +564,15 @@ def main():
                 )
                 step_loss["v"] = out.loss.detach()
                 return out.loss
-            # Enriched path: cheap forward up to last hidden state, then a
-            # tiny lm_head + CE with grad on JUST the hidden state. Main
-            # model parameters never see autograd.
+            # Enriched path: cheap forward up to logits, then CE with grad on
+            # JUST the logits. Main model parameters never see autograd.
             with torch.no_grad():
                 base_out = model(
                     input_ids=batch["input_ids"],
                     attention_mask=batch["attention_mask"],
-                    output_hidden_states=True,
                 )
-            last_hidden = base_out.hidden_states[-1].detach().requires_grad_(True)
-            lm_head = getattr(model, "lm_head", None) or model.get_output_embeddings()
+                logits = base_out.logits.detach().requires_grad_(True)
             with torch.enable_grad():
-                logits = lm_head(last_hidden)
                 shift_logits = logits[..., :-1, :].contiguous()
                 shift_labels = batch["labels"][..., 1:].contiguous()
                 loss_t = F.cross_entropy(
@@ -584,9 +580,9 @@ def main():
                     shift_labels.view(-1),
                     ignore_index=-100,
                 )
-                loss_t.backward()
+                grad_logits = torch.autograd.grad(loss_t, logits)[0].detach()
             step_loss["v"] = loss_t.detach()
-            return loss_t.detach(), last_hidden.detach(), last_hidden.grad.detach()
+            return loss_t.detach(), logits.detach(), grad_logits
 
         t0 = time.perf_counter()
         if is_first_order:

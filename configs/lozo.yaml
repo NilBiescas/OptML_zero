@@ -1,32 +1,26 @@
-dataset:
-  template: "mezo"
-  task: "multirc"
-  num_train: 1000
-  num_dev: 500
-  num_eval: 1000
+owner: nil
 
 model:
-  name: "Qwen/Qwen2.5-0.5B"
-  dtype: "float16"
+  name: Qwen/Qwen2.5-0.5B
+  dtype: bfloat16
 
 training:
   seed: 87
-  batch_size: 16
+  batch_size: 32
   max_steps: 20000
   eval_steps: 500
-  eval_epochs: 1000
-  lr_scheduler:
-    type: "constant"
+  num_train: 1000
+  num_eval: 1000
 
 optimizer:
-  name: "LOZO"
+  name: LOZO
   kwargs:
-    lr: 1e-7
+    lr: 1e-6              
     eps: 1e-3
     weight_decay: 0.0
-    r: 1
-    nu: 100
+    rank_r: 4             
+    step_interval: 100    
 
 hub:
   push_to_hub: true
-  repo_id: "Nbiescas/zo-lozo-qwen"
+  repo_id: Nbiescas/zo-comparison-qwen

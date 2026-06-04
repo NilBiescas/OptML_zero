@@ -34,7 +34,7 @@ runai submit \
   --environment WANDB_NAME="${JOB_NAME}" \
   --environment GITHUB_TOKEN="${GITHUB_TOKEN:-}" \
   --command -- bash -c "ln -sf /usr/bin/python3 /usr/bin/python && \
-git clone -b qwen-superglue https://\${GITHUB_TOKEN}@github.com/NilBiescas/OptML_zero.git && \
+git clone -b nil_branch https://\${GITHUB_TOKEN}@github.com/NilBiescas/OptML_zero.git && \
 cd OptML_zero && \
 pip install -r requirements.txt && \
 python train.py --config configs/${METHOD}.yaml --task ${DATASET}"
