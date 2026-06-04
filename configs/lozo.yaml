@@ -16,8 +16,8 @@ training:
 optimizer:
   name: LOZO
   kwargs:
-    lr: 1e-7              # matches lozo.sh LR
+    lr: 1e-6              # matches LOZO/medium_models/submit.sh LR=1e-6
     eps: 1e-3
     weight_decay: 0.0
-    rank_r: 1             # matches lozo.sh RANK
-    step_interval: 100    # matches lozo.sh STEP_INTERVAL
+    rank_r: 4             # matches LOZO/medium_models/submit.sh RANK=4
+    step_interval: 100    # matches LOZO/medium_models/submit.sh STEP_INTERVAL=100
