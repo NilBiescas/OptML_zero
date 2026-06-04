@@ -26,4 +26,4 @@ optimizer:
 
 hub:
   push_to_hub: true
-  repo_id: NilBiescas/zo-comparison-qwen
+  repo_id: Nbiescas/zo-comparison-qwen
