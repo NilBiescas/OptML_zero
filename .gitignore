@@ -22,6 +22,9 @@ LOZO/
 SubZero/
 PseuZO/
 submit_multirc_nil.sh
+submit_lozo.sh
+submit_pseuzo.sh
+submit_subzero.sh
 .deploy_keys/
 # Environment variables
 .env
