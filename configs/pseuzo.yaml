@@ -23,3 +23,7 @@ optimizer:
     weight_decay: 0.0
     sliding_window_length: 14
     momentum_fb: 0.9
+
+hub:
+  push_to_hub: true
+  repo_id: NilBiescas/zo-comparison-qwen

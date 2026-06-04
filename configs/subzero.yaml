@@ -25,3 +25,7 @@ optimizer:
     update_interval: 1000 # matches submit_subzero.sh (not default 10)
     perturbation_mode: two_side
     mode: full
+
+hub:
+  push_to_hub: true
+  repo_id: NilBiescas/zo-comparison-qwen

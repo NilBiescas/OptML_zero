@@ -21,3 +21,7 @@ optimizer:
     weight_decay: 0.0
     rank_r: 4             # matches LOZO/medium_models/submit.sh RANK=4
     step_interval: 100    # matches LOZO/medium_models/submit.sh STEP_INTERVAL=100
+
+hub:
+  push_to_hub: true
+  repo_id: NilBiescas/zo-comparison-qwen
