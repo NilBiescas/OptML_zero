@@ -2,11 +2,11 @@ owner: nil
 
 model:
   name: Qwen/Qwen2.5-0.5B
-  dtype: bfloat16
+  dtype: float32
 
 training:
-  seed: 87
-  batch_size: 32
+  seed: 42
+  batch_size: 16
   max_steps: 20000
   eval_steps: 500
   num_train: 1000
@@ -15,7 +15,7 @@ training:
 optimizer:
   name: LOZO
   kwargs:
-    lr: 1e-6              
+    lr: 1e-7              
     eps: 1e-3
     weight_decay: 0.0
     rank_r: 4             

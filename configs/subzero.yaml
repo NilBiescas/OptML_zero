@@ -2,7 +2,7 @@ owner: nil
 
 model:
   name: Qwen/Qwen2.5-0.5B
-  dtype: bfloat16
+  dtype: float32
 
 training:
   seed: 42
