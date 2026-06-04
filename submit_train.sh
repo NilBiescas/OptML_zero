@@ -8,7 +8,7 @@ GASPAR="nil"
 
 GPUS=1
 NODE="${NODE:-h100}"
-PROJECT="dhlab-${GASPAR}"
+PROJECT="vilab-${GASPAR}"
 IMAGE="registry.rcp.epfl.ch/course-cs-552/base-vllm:v1"
 
 # Source environment variables for WandB/HF tokens
