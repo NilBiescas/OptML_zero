@@ -2,7 +2,7 @@
 owner: maria
 
 model:
-  name: Qwen/Qwen2.5-0.5B
+  name: Qwen/Qwen3.5-0.8B
   dtype: float16
 
 training:
@@ -16,7 +16,7 @@ training:
 optimizer:
   name: HiZOO
   kwargs:
-    lr: 1e-7
+    lr: 1e-6
     eps: 1e-3
     hessian_smooth_type: constant1e-8
     weight_decay: 0.0

@@ -433,18 +433,48 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(weights_src, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    load_kwargs = dict(trust_remote_code=True)
     if cfg.get("model", {}).get("load_in_8bit", False):
         from transformers import BitsAndBytesConfig
         print("[Model] using load_in_8bit (bitsandbytes)")
-        model = AutoModelForCausalLM.from_pretrained(
-            weights_src, trust_remote_code=True,
-            quantization_config=BitsAndBytesConfig(load_in_8bit=True),
-            device_map={"": 0},
-        )
+        load_kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
+        load_kwargs["device_map"] = {"": 0}
+        move_to_device = False
     else:
-        model = AutoModelForCausalLM.from_pretrained(
-            weights_src, trust_remote_code=True, torch_dtype=model_dtype,
-        ).to(device)
+        load_kwargs["torch_dtype"] = model_dtype
+        move_to_device = True
+
+    # Robust auto-class resolution. Qwen2.5-* are plain ForCausalLM models and
+    # load through AutoModelForCausalLM. Qwen3.5-0.8B is a multimodal model
+    # (Qwen3_5ForConditionalGeneration) which isn't registered under
+    # AutoModelForCausalLM — fall back to the image-text-to-text class and
+    # use it text-only (no pixel inputs). Both expose .logits/.loss when
+    # called with labels, plus output_hidden_states and get_output_embeddings,
+    # which is all the closure/eval paths rely on.
+    model = None
+    last_err = None
+    for auto_cls_name in ("AutoModelForCausalLM", "AutoModelForImageTextToText", "AutoModel"):
+        try:
+            import transformers
+            auto_cls = getattr(transformers, auto_cls_name)
+        except AttributeError:
+            continue
+        try:
+            model = auto_cls.from_pretrained(weights_src, **load_kwargs)
+            if auto_cls_name != "AutoModelForCausalLM":
+                print(f"[Model] loaded via {auto_cls_name} "
+                      f"(arch not registered as plain CausalLM — running text-only)")
+            break
+        except Exception as e:  # noqa: BLE001 — surface the original below if all fail
+            last_err = e
+            continue
+    if model is None:
+        raise RuntimeError(
+            f"Could not load {weights_src!r} through any auto-class. Last error:\n{last_err}\n"
+            "If this is a very new model, upgrade transformers (see requirements.txt)."
+        )
+    if move_to_device:
+        model = model.to(device)
     model.config.pad_token_id = tokenizer.pad_token_id
     # ZO assumes no dropout noise in the gradient estimate; FO trains with
     # dropout enabled like a normal first-order fine-tune.
