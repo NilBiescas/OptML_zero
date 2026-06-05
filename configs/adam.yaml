@@ -5,13 +5,13 @@ owner: maria
 
 model:
   name: Qwen/Qwen3.5-0.8B
-  dtype: float32      # Adam is unstable in fp16/bf16 at small lr; Qwen-0.8B
-                      # in fp32 is fine memory-wise on H100 (~10 GB).
+  dtype: float32      # Adam is unstable in fp16/bf16; fp32 needed for stability
 
 training:
   seed: 42
-  batch_size: 16
-  max_steps: 20000    # match the ZO budget for fair compute comparison
+  batch_size: 2                  # micro-batch per forward (fits in 80GB)
+  grad_accumulation_steps: 8    # effective BS = 2 * 8 = 16 (same as ZO)
+  max_steps: 20000
   eval_steps: 500
   num_train: 1000
   num_eval: 1000

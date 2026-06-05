@@ -327,6 +327,7 @@ def main():
 
     seed       = cfg.get("training", {}).get("seed", 42)
     batch_size = cfg.get("training", {}).get("batch_size", 16)
+    grad_accum = cfg.get("training", {}).get("grad_accumulation_steps", 1)
     max_steps  = cfg.get("training", {}).get("max_steps", 20000)
     eval_steps = cfg.get("training", {}).get("eval_steps", 500)
     num_train  = cfg.get("training", {}).get("num_train", 1000)
@@ -620,21 +621,28 @@ def main():
 
         t0 = time.perf_counter()
         if is_first_order:
-            # Standard backprop training step. `closure` isn't used by FO
-            # optimizers — we just call the model directly so the loss is in
-            # the autograd graph. step_loss + step_forwards are populated
-            # manually to keep the wandb log shape identical to ZO runs.
+            # Standard backprop with optional gradient accumulation.
+            # Splits the batch into grad_accum micro-batches; each contributes
+            # loss/grad_accum to the gradient, giving the same effective BS
+            # as batch_size * grad_accum at lower peak memory.
             optimizer.zero_grad(set_to_none=True)
-            out = model(
-                input_ids=batch["input_ids"],
-                attention_mask=batch["attention_mask"],
-                labels=batch["labels"],
-            )
-            loss_t = out.loss
-            loss_t.backward()
+            accum_loss = torch.tensor(0.0, device=device)
+            micro_size = max(1, batch["input_ids"].size(0) // grad_accum)
+            for acc_i in range(grad_accum):
+                s = acc_i * micro_size
+                e = s + micro_size if acc_i < grad_accum - 1 else batch["input_ids"].size(0)
+                micro = {k: v[s:e] for k, v in batch.items()}
+                out = model(
+                    input_ids=micro["input_ids"],
+                    attention_mask=micro["attention_mask"],
+                    labels=micro["labels"],
+                )
+                loss_t = out.loss / grad_accum
+                loss_t.backward()
+                accum_loss += loss_t.detach()
+                step_forwards["n"] += 1
             optimizer.step()
-            step_loss["v"]     = loss_t.detach()
-            step_forwards["n"] = 1
+            step_loss["v"] = accum_loss
         else:
             optimizer.step(closure)
         if torch.cuda.is_available():
