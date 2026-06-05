@@ -101,7 +101,7 @@ class SubZero(Optimizer):
                 if not p.requires_grad:
                     continue
                 name = p.param_name
-                if len(torch.squeeze(p.data).shape) == 2:
+                if len(p.data.shape) == 2:
                     if self._step == 0 or name not in self._p_state:
                         self._p_state[name] = {
                             'U': torch.zeros(p.data.size(0), self.gauss_rank,
@@ -189,7 +189,7 @@ class SubZero(Optimizer):
         with torch.no_grad():
             torch.manual_seed(zo_random_seed)
             for p, U, V in trainable:
-                if len(torch.squeeze(p.data).shape) == 2:
+                if len(p.data.shape) == 2:
                     z0 = torch.normal(
                         mean=0, std=1,
                         size=(self.gauss_rank, self.gauss_rank),
