@@ -64,7 +64,7 @@ class LOZO(Optimizer):
     def _perturb(self, trainable, scaling_factor, zo_eps):
         for p in trainable:
             name = p.param_name
-            if p.data.ndim >= 2:
+            if p.data.ndim == 2:
                 if self._step % self.step_interval == 0 or name not in self._v:
                     v = torch.randn(
                         p.data.size(1), self.rank_r,
@@ -127,7 +127,7 @@ class LOZO(Optimizer):
             torch.manual_seed(zo_random_seed)
             for p in trainable:
                 name = p.param_name
-                if p.data.ndim >= 2:
+                if p.data.ndim == 2:
                     v = self._v[name]
                     u = self._random_gaussian_matrix(
                         m=p.data.size(0), n=self.rank_r,
