@@ -7,7 +7,7 @@ GASPAR="nil"
 
 GPUS=1
 NODE="${NODE:-h100}"
-PROJECT="${PROJECT:-dhlab-${GASPAR}}"
+PROJECT="${PROJECT:-vilab-${GASPAR}}"
 IMAGE="registry.rcp.epfl.ch/course-cs-552/base-vllm:v1"
 
 if [ -f .env ]; then
