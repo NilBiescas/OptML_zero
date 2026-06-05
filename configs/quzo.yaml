@@ -18,4 +18,12 @@ training:
 optimizer:
   name: QuZO
   kwargs:
-    # TODO: fill in hyperparameters from the paper / reference code
+    lr: 1e-7              # scaled down from paper's 1e-6 (LLaMA-2-7B) for Qwen3.5-0.8B
+    eps: 1e-3             # perturbation epsilon (paper default)
+    perturb_bits: 8       # quantise the perturbation z to 8 bits (paper default)
+    wbit: 8               # re-quantise weights after each update to 8 bits
+    quantized_perturb: true
+    weight_decay: 0.0
+    lr_scheduler: cosine  # cosine decay (matches RCP2 best result for this model scale)
+    lr_min_ratio: 0.1
+    total_steps: 12000
