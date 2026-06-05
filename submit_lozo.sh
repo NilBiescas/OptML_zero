@@ -36,7 +36,6 @@ runai submit \
   --command -- bash -c "ln -sf /usr/bin/python3 /usr/bin/python && \
 git clone -b nil_branch https://\${GITHUB_TOKEN}@github.com/NilBiescas/OptML_zero.git && \
 cd OptML_zero && \
-pip install -r requirements.txt && \
 python train.py --config configs/${METHOD}.yaml --task ${DATASET}"
 
 echo ">>> Job submitted: ${JOB_NAME}"
