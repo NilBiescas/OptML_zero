@@ -225,7 +225,7 @@ class HiZOO(Optimizer):
         weight_decay = group["weight_decay"]
 
         # LR schedule (applied on top of base_lr, entirely inside the optimizer)
-        t = self._step / max(1, self.total_steps)
+        t = min(1.0, self._step / max(1, self.total_steps))  # clamp to [0,1]
         if self.lr_scheduler == "cosine":
             zo_lr = base_lr * (self.lr_min_ratio +
                     (1 - self.lr_min_ratio) * 0.5 * (1 + math.cos(math.pi * t)))
