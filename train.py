@@ -569,12 +569,17 @@ def main():
             if hasattr(optimizer, "on_epoch_start"):
                 optimizer.on_epoch_start(epoch_idx, math.ceil(total_epochs))
 
-        try:
-            batch = next(train_iter)
-        except StopIteration:
-            train_iter = iter(train_loader)
-            batch = next(train_iter)
-        batch = {k: v.to(device) for k, v in batch.items()}
+        # For FO with grad_accum > 1, collect grad_accum consecutive micro-batches.
+        # For ZO (grad_accum == 1) this is identical to the original single-batch fetch.
+        micro_batches = []
+        for _ in range(grad_accum if is_first_order else 1):
+            try:
+                mb = next(train_iter)
+            except StopIteration:
+                train_iter = iter(train_loader)
+                mb = next(train_iter)
+            micro_batches.append({k: v.to(device) for k, v in mb.items()})
+        batch = micro_batches[0]  # ZO and logging use this
 
         step_loss     = {"v": None}
         step_forwards = {"n": 0}
@@ -622,16 +627,12 @@ def main():
         t0 = time.perf_counter()
         if is_first_order:
             # Standard backprop with optional gradient accumulation.
-            # Splits the batch into grad_accum micro-batches; each contributes
-            # loss/grad_accum to the gradient, giving the same effective BS
-            # as batch_size * grad_accum at lower peak memory.
+            # grad_accum consecutive micro-batches are fetched above;
+            # each contributes loss/grad_accum to the gradient.
+            # Effective BS = batch_size (micro) * grad_accum_steps.
             optimizer.zero_grad(set_to_none=True)
             accum_loss = torch.tensor(0.0, device=device)
-            micro_size = max(1, batch["input_ids"].size(0) // grad_accum)
-            for acc_i in range(grad_accum):
-                s = acc_i * micro_size
-                e = s + micro_size if acc_i < grad_accum - 1 else batch["input_ids"].size(0)
-                micro = {k: v[s:e] for k, v in batch.items()}
+            for micro in micro_batches:
                 out = model(
                     input_ids=micro["input_ids"],
                     attention_mask=micro["attention_mask"],
