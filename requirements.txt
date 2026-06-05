@@ -1,6 +1,6 @@
 torch>=2.1
 transformers>=5.2.0
-datasets>=2.18
+datasets==2.20.0
 huggingface_hub>=0.22
 wandb>=0.17
 pyyaml>=6.0
