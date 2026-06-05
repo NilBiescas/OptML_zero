@@ -127,11 +127,11 @@ def copa_format_eval(ex, tokenizer):
 # --------------------------------------------------------------------------
 
 def _sst2_prompt(ex) -> str:
-    return f"{ex['sentence']}\nSentiment:"
+    return f"{ex['sentence'].strip()} It was"
 
 def sst2_format_train(ex, tokenizer):
     prompt = _sst2_prompt(ex)
-    verb = " Positive" if ex["label"] == 1 else " Negative"
+    verb = " great" if ex["label"] == 1 else " terrible"
     full = prompt + verb
     prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
     full_ids = tokenizer(full, add_special_tokens=False)["input_ids"]
@@ -145,13 +145,13 @@ def sst2_format_eval(ex, tokenizer):
     prompt = _sst2_prompt(ex)
     prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
     candidates = [
-        tokenizer(" Negative", add_special_tokens=False)["input_ids"],
-        tokenizer(" Positive", add_special_tokens=False)["input_ids"],
+        tokenizer(" terrible", add_special_tokens=False)["input_ids"],
+        tokenizer(" great", add_special_tokens=False)["input_ids"],
     ]
     return {
         "prompt_ids": prompt_ids,
         "candidates": candidates,
-        "gold_idx": int(ex["label"]),  # 0 → Negative, 1 → Positive
+        "gold_idx": int(ex["label"]),  # 0 → terrible, 1 → great
     }
 
 
