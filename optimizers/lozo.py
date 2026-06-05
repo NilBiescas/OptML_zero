@@ -65,14 +65,7 @@ class LOZO(Optimizer):
         for p in trainable:
             name = p.param_name
             if p.data.ndim == 2:
-                if self._step % self.step_interval == 0 or name not in self._v:
-                    v = torch.randn(
-                        p.data.size(1), self.rank_r,
-                        device=p.data.device, dtype=p.data.dtype,
-                    )
-                    self._v[name] = v
-                else:
-                    v = self._v[name]
+                v = self._v[name]
                 u = self._random_gaussian_matrix(
                     m=p.data.size(0), n=self.rank_r,
                     device=p.data.device, dtype=p.data.dtype,
@@ -101,6 +94,15 @@ class LOZO(Optimizer):
             for p in g["params"]
             if p.requires_grad
         ]
+
+        # Resample V outside of the seeded blocks to keep RNG streams perfectly aligned
+        if self._step % self.step_interval == 0 or not self._v:
+            for p in trainable:
+                if p.data.ndim == 2:
+                    self._v[p.param_name] = torch.randn(
+                        p.data.size(1), self.rank_r,
+                        device=p.data.device, dtype=p.data.dtype,
+                    )
 
         # --- lowrank_zo_step ---
         zo_random_seed = np.random.randint(1000000000)
