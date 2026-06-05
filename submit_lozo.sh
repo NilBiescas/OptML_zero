@@ -6,8 +6,8 @@ METHOD="lozo"
 GASPAR="nil"
 
 GPUS=1
-NODE="${NODE:-a100-40g}"
-PROJECT="${PROJECT:-vilab-${GASPAR}}"
+NODE="${NODE:-h100}"
+PROJECT="${PROJECT:-dhlab-${GASPAR}}"
 IMAGE="registry.rcp.epfl.ch/course-cs-552/base-vllm:v1"
 
 if [ -f .env ]; then

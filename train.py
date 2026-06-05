@@ -574,7 +574,21 @@ def main():
                 logits = base_out.logits.detach().requires_grad_(True)
                 del base_out
             with torch.enable_grad():
-                if opt_name == "PseuZO":
+                if opt_name == "PseuZO" and False:
+                    # PseuZO calls closure twice per batch. The second call is for 
+                    # perturbed outputs and does not need gradients. Skipping 
+                    # the backward pass here saves ~3GB of memory.
+                    if step_forwards["n"] == 2:
+                        shift_logits = logits[..., :-1, :].contiguous()
+                        shift_labels = batch["labels"][..., 1:].contiguous()
+                        loss_t = F.cross_entropy(
+                            shift_logits.view(-1, shift_logits.size(-1)),
+                            shift_labels.view(-1),
+                            ignore_index=-100,
+                        )
+                        step_loss["v"] = loss_t.detach()
+                        return loss_t.detach(), logits.detach(), None
+                        
                     # Chunk gradient computation over the batch dimension to avoid 
                     # a massive peak memory spike during cross-entropy backprop.
                     grad_logits = torch.zeros_like(logits)
