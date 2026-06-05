@@ -6,7 +6,7 @@ model:
 
 training:
   seed: 42
-  batch_size: 16
+  batch_size: 12
   max_steps: 20000
   eval_steps: 500
   num_train: 1000
@@ -16,7 +16,7 @@ optimizer:
   name: PseuZO
   kwargs:
     lr: 1e-7              # matches submit_pseuzo.sh LR
-    eps: 1e-3
+    eps: 1e-4
     weight_decay: 0.0
     sliding_window_length: 14
     momentum_fb: 0.9

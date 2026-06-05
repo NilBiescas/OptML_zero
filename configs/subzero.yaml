@@ -2,7 +2,7 @@ owner: nil
 
 model:
   name: Qwen/Qwen3.5-0.8B
-  dtype: float32
+  dtype: bfloat16
 
 training:
   seed: 42
@@ -16,10 +16,10 @@ optimizer:
   name: SubZero
   kwargs:
     lr: 1e-7            
-    eps: 1e-3
+    eps: 1e-4
     weight_decay: 0.0
     gauss_rank: 24       
-    update_interval: 1000 
+    update_interval: 10 
     perturbation_mode: two_side
     mode: full
 
