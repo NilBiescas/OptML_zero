@@ -5,7 +5,8 @@ owner: maria
 
 model:
   name: Qwen/Qwen3.5-0.8B
-  load_in_8bit: true       # bitsandbytes 8-bit base; ~half the memory of fp16
+  load_in_8bit: false      # fp16 model — all params trainable; bitsandbytes freezes
+                           # Linear weights making ZO ineffective (only norms update)
 
 training:
   seed: 42
@@ -21,7 +22,9 @@ optimizer:
     lr: 1e-7              # scaled down from paper's 1e-6 (LLaMA-2-7B) for Qwen3.5-0.8B
     eps: 1e-3             # perturbation epsilon (paper default)
     perturb_bits: 8       # quantise the perturbation z to 8 bits (paper default)
-    wbit: 8               # re-quantise weights after each update to 8 bits
+    wbit: 32              # 8-bit = bitsandbytes model load, NOT per-step weight re-quant.
+                          # With load_in_8bit, only float params (norms/biases) are trainable;
+                          # re-quantising them to 8-bit each step causes divergence.
     quantized_perturb: true
     weight_decay: 0.0
     lr_scheduler: cosine  # cosine decay (matches RCP2 best result for this model scale)
