@@ -572,6 +572,7 @@ def main():
                     attention_mask=batch["attention_mask"],
                 )
                 logits = base_out.logits.detach().requires_grad_(True)
+                del base_out
             with torch.enable_grad():
                 if opt_name == "PseuZO":
                     # Chunk gradient computation over the batch dimension to avoid 
@@ -595,9 +596,11 @@ def main():
                         if loss_i.item() > 0:
                             grad_logits[i:i+1] = torch.autograd.grad(loss_i, l_i)[0].detach()
                         loss_sum += loss_i.item()
+                        del l_i, shift_l, shift_lbl, loss_i
                         
                     loss_t = torch.tensor(loss_sum / max(1, valid_tokens), device=logits.device)
-                    grad_logits = grad_logits / max(1, valid_tokens)
+                    # In-place division avoids allocating a new 2.5GB tensor!
+                    grad_logits /= max(1, valid_tokens)
                 else:
                     shift_logits = logits[..., :-1, :].contiguous()
                     shift_labels = batch["labels"][..., 1:].contiguous()
