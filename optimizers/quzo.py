@@ -4,18 +4,15 @@ Zhou et al., EMNLP 2025 — https://arxiv.org/abs/2502.12346
 Reference: https://github.com/lloo099/QuZO
 
 Core idea: perturb parameters with a *quantized* random direction z̃ (to
-perturb_bits precision) instead of a full-precision z.  After each parameter
-update, the weights are re-quantized to wbit precision to stay in the
-quantized-forward regime.  The combination yields significantly lower peak GPU
-memory than MeZO at FP16, matching an 8-bit forward pass.
+perturb_bits precision) instead of a full-precision z.  Both the forward
+perturbation and the parameter update use the SAME z̃ — this is guaranteed by
+(a) using the same torch seed for z_fp generation and (b) using a *local*
+Generator for quantisation rounding so that the global RNG is never polluted
+inside the param loop.
 
-Harness adaptations:
-  • zo_forward(model, inputs) → closure()         (called exactly 2× per step)
-  • All quantisation helpers are inlined here;
-    no dependency on the original QuZO repo's trainer files.
-  • wbit < 32 triggers weight re-quantisation after each update;
-    pass wbit=32 to disable (equivalent to plain MeZO with quantised z̃).
-  • `quantized_perturb` flag toggles quantised z̃ (True = QuZO, False = MeZO).
+Without fix (a) + (b): torch.manual_seed() inside the quant call resets the
+global RNG, making z_fp for params 2, 3, … inconsistent between perturb and
+update → biased gradient estimate → model degradation.
 """
 
 import math
@@ -25,15 +22,23 @@ from torch.optim import Optimizer
 
 
 # ---------------------------------------------------------------------------
-# Quantisation helpers (ported + patched from lloo099/QuZO/large_models/)
+# Quantisation helpers — deterministic, using a local Generator so the global
+# RNG is never touched inside a per-param loop.
 # ---------------------------------------------------------------------------
 
-def _zo_quant_sym(x: torch.Tensor, nbits: int, stochastic: bool = True,
-                  seed: int | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+def _zo_quant_sym(
+    x: torch.Tensor,
+    nbits: int,
+    seed: int | None = None,
+    stochastic: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Symmetric uniform quantisation of x to nbits bits.
 
-    Returns (x_quant, scale) where dequant = x_quant / scale.
     Uses block-exponent scaling (power-of-2 scale) from the paper.
+    A local Generator is used for stochastic rounding so the caller's global
+    RNG state is not disturbed.
+
+    Returns (x_quant, scale) where dequant = x_quant / scale.
     """
     if not x.is_floating_point():
         x = x.float()
@@ -42,21 +47,19 @@ def _zo_quant_sym(x: torch.Tensor, nbits: int, stochastic: bool = True,
 
     x1 = x.abs().max()
     if x1.item() == 0:
-        # Constant-zero tensor — identity quantisation.
         return x.clone(), torch.ones(1, device=x.device, dtype=x.dtype)
 
-    # Block-exponent scale (power of 2) — exact as in the paper.
     scale_raw = n / x1
     scale = 2.0 ** torch.floor(torch.log2(scale_raw))
 
-    if seed is not None:
-        torch.manual_seed(seed)
-
     if stochastic:
+        gen = torch.Generator(device=x.device)
+        if seed is not None:
+            gen.manual_seed(int(seed))
         x_scaled = x * scale
         x_floor = torch.floor(x_scaled)
         rest = torch.clamp(x_scaled - x_floor, 0.0, 1.0)
-        x_int = x_floor + torch.bernoulli(rest)
+        x_int = x_floor + torch.bernoulli(rest, generator=gen)
     else:
         x_int = torch.round(x * scale)
 
@@ -68,36 +71,6 @@ def _zo_dequant(x_quant: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
     return x_quant / scale
 
 
-def _zo_quant_data_sym(x: torch.Tensor, nbits: int,
-                        stochastic: bool = True) -> tuple[torch.Tensor, torch.Tensor]:
-    """Symmetric quantisation for weight re-quantisation after each update.
-
-    Safe for Int8 tensors (bitsandbytes): casts to float32 first.
-    """
-    if not x.is_floating_point():
-        x = x.float()
-
-    n = 2 ** (nbits - 1)
-
-    x1 = x.abs().max()
-    if x1.item() == 0:
-        return x.clone(), torch.ones(1, device=x.device, dtype=x.dtype)
-
-    scale_raw = n / x1
-    scale = 2.0 ** torch.floor(torch.log2(scale_raw))
-
-    if stochastic:
-        x_scaled = x * scale
-        x_floor = torch.floor(x_scaled)
-        rest = torch.clamp(x_scaled - x_floor, 0.0, 1.0)
-        x_int = x_floor + torch.bernoulli(rest)
-    else:
-        x_int = torch.round(x * scale)
-
-    x_quant = x_int.clamp(-n, n - 1)
-    return x_quant, scale
-
-
 # ---------------------------------------------------------------------------
 
 class QuZO(Optimizer):
@@ -105,11 +78,13 @@ class QuZO(Optimizer):
 
     Args:
         params:              model.parameters()
-        lr:                  learning rate (paper: 1e-6 for LLaMA-2-7B)
+        lr:                  learning rate
         eps:                 perturbation ε (paper: 1e-3)
         perturb_bits:        bits for quantising the perturbation z (paper: 8)
-        wbit:                bits for re-quantising weights after update
-                             (paper: 8; set 32 to disable weight re-quant)
+        wbit:                bits for re-quantising weights after update.
+                             Set 32 to disable (recommended when model is
+                             already loaded in 8-bit via bitsandbytes, or
+                             when only float norms/biases are trainable).
         quantized_perturb:   True → QuZO (quantised z̃); False → plain MeZO
         weight_decay:        L2 regularisation (paper: 0)
         lr_scheduler:        "constant" | "cosine" | "linear"
@@ -120,17 +95,16 @@ class QuZO(Optimizer):
     def __init__(
         self,
         params,
-        lr: float = 1e-7,
+        lr: float = 1e-6,
         eps: float = 1e-3,
         perturb_bits: int = 8,
-        wbit: int = 8,
+        wbit: int = 32,
         quantized_perturb: bool = True,
         weight_decay: float = 0.0,
-        lr_scheduler: str = "cosine",
+        lr_scheduler: str = "constant",
         lr_min_ratio: float = 0.1,
         total_steps: int = 12000,
     ):
-        # YAML may deliver numeric kwargs as strings.
         defaults = dict(
             lr=float(lr),
             eps=float(eps),
@@ -157,29 +131,36 @@ class QuZO(Optimizer):
         return base_lr  # "constant"
 
     # ------------------------------------------------------------------
+    def _quantise_z(self, z_fp: torch.Tensor, seed: int, param_id: int) -> torch.Tensor:
+        """Quantise z_fp to perturb_bits using a local Generator (no global RNG pollution)."""
+        if not self.quantized_perturb:
+            return z_fp
+        z_q, z_scale = _zo_quant_sym(
+            z_fp, nbits=self.perturb_bits,
+            seed=seed + param_id,
+            stochastic=True,   # unbiased — same seed → same result each call
+        )
+        return _zo_dequant(z_q, z_scale)
+
+    # ------------------------------------------------------------------
     @torch.no_grad()
-    def _perturb(self, trainable, seed, scale):
-        """Add scale * z̃ * eps to every trainable parameter (in-place)."""
-        group = self.param_groups[0]
-        zo_eps = group["eps"]
+    def _perturb(self, trainable: list, seed: int, scale: float) -> None:
+        """θ ← θ + scale * z̃ * eps.  Uses deterministic seed so perturb/update match."""
+        zo_eps = self.param_groups[0]["eps"]
+        # Reset the *global* RNG once before the loop so z_fp is reproducible.
+        # _quantise_z uses a *local* Generator → does NOT advance the global RNG.
         torch.manual_seed(seed)
         for p in trainable:
-            dtype = p.data.dtype if p.data.is_floating_point() else torch.float32
-            z_fp = torch.normal(0, 1, size=p.data.size(),
-                                device=p.data.device, dtype=dtype)
-            if self.quantized_perturb:
-                # Quantise the random direction z then dequantise — core QuZO step.
-                z_q, z_scale = _zo_quant_sym(z_fp, nbits=self.perturb_bits,
-                                              stochastic=True,
-                                              seed=seed + getattr(p, 'param_id', 0))
-                z_eff = _zo_dequant(z_q, z_scale)
-            else:
-                z_eff = z_fp
+            pid = getattr(p, "param_id", id(p) % (2**31))
+            z_fp = torch.normal(0.0, 1.0, size=p.data.size(),
+                                device=p.data.device,
+                                dtype=p.data.dtype if p.data.is_floating_point()
+                                      else torch.float32)
+            z_eff = self._quantise_z(z_fp, seed, pid)
 
             if p.data.is_floating_point():
                 p.data.add_(scale * z_eff * zo_eps)
             else:
-                # Int8 bitsandbytes param — operate in float, write back.
                 p.data = (p.data.float() + scale * z_eff * zo_eps).to(p.data.dtype)
 
     # ------------------------------------------------------------------
@@ -205,7 +186,7 @@ class QuZO(Optimizer):
             self._perturb(trainable, seed, scale=+1.0)
             loss1 = closure().detach()
 
-            # F(θ − εz̃)  (net: θ − 2εz̃)
+            # F(θ − εz̃)
             self._perturb(trainable, seed, scale=-2.0)
             loss2 = closure().detach()
 
@@ -214,20 +195,15 @@ class QuZO(Optimizer):
 
             projected_grad = ((loss1 - loss2) / (2.0 * zo_eps)).item()
 
-            # Parameter update using the same quantised z̃
+            # Parameter update — SAME seed + SAME _quantise_z → SAME z̃ as perturb
             torch.manual_seed(seed)
             for p in trainable:
-                dtype = p.data.dtype if p.data.is_floating_point() else torch.float32
-                z_fp = torch.normal(0, 1, size=p.data.size(),
-                                    device=p.data.device, dtype=dtype)
-                if self.quantized_perturb:
-                    z_q, z_scale = _zo_quant_sym(z_fp, nbits=self.perturb_bits,
-                                                  stochastic=False,
-                                                  seed=seed + getattr(p, 'param_id', 0))
-                    z_eff = _zo_dequant(z_q, z_scale)
-                else:
-                    z_eff = z_fp
-
+                pid = getattr(p, "param_id", id(p) % (2**31))
+                z_fp = torch.normal(0.0, 1.0, size=p.data.size(),
+                                    device=p.data.device,
+                                    dtype=p.data.dtype if p.data.is_floating_point()
+                                          else torch.float32)
+                z_eff = self._quantise_z(z_fp, seed, pid)
                 grad = projected_grad * z_eff
 
                 if p.data.is_floating_point():
@@ -235,26 +211,25 @@ class QuZO(Optimizer):
                         grad = grad + weight_decay * p.data
                     p.data.add_(-zo_lr * grad)
                 else:
-                    p_float = p.data.float()
+                    p_f = p.data.float()
                     if weight_decay != 0.0:
-                        grad = grad + weight_decay * p_float
-                    p.data = (p_float - zo_lr * grad).to(p.data.dtype)
+                        grad = grad + weight_decay * p_f
+                    p.data = (p_f - zo_lr * grad).to(p.data.dtype)
 
-                # Weight re-quantisation: simulate 8-bit quantisation-aware update.
-                # Disabled when wbit=32 or for non-float params (already quantised
-                # by bitsandbytes; we'd double-quantise).
+                # Weight re-quantisation — only if explicitly enabled (wbit < 32)
+                # and param is floating-point. Disabled by default: with fp16 model
+                # and LR=1e-7, quantisation noise >> gradient signal per step.
                 if self.wbit < 32 and p.data.is_floating_point():
-                    q, scale = _zo_quant_data_sym(p.data, nbits=self.wbit,
-                                                   stochastic=True)
-                    p.data = _zo_dequant(q, scale).to(p.data.dtype)
+                    q, scale_w = _zo_quant_sym(p.data, nbits=self.wbit, stochastic=False)
+                    p.data = _zo_dequant(q, scale_w).to(p.data.dtype)
 
         self._step += 1
 
         self.last_metrics = {
-            "loss_plus":       float(loss1.item()),
-            "loss_minus":      float(loss2.item()),
-            "projected_grad":  projected_grad,
-            "lr_effective":    zo_lr,
+            "loss_plus":      float(loss1.item()),
+            "loss_minus":     float(loss2.item()),
+            "projected_grad": projected_grad,
+            "lr_effective":   zo_lr,
         }
 
         return loss1

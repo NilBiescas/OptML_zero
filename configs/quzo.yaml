@@ -19,14 +19,11 @@ training:
 optimizer:
   name: QuZO
   kwargs:
-    lr: 1e-7              # scaled down from paper's 1e-6 (LLaMA-2-7B) for Qwen3.5-0.8B
+    lr: 1e-6              # matches Sparse-MeZO working LR on Qwen3.5-0.8B
     eps: 1e-3             # perturbation epsilon (paper default)
     perturb_bits: 8       # quantise the perturbation z to 8 bits (paper default)
-    wbit: 32              # 8-bit = bitsandbytes model load, NOT per-step weight re-quant.
-                          # With load_in_8bit, only float params (norms/biases) are trainable;
-                          # re-quantising them to 8-bit each step causes divergence.
+    wbit: 32              # no weight re-quant: fp16 model + LR=1e-6, quant noise >> grad
     quantized_perturb: true
     weight_decay: 0.0
-    lr_scheduler: cosine  # cosine decay (matches RCP2 best result for this model scale)
-    lr_min_ratio: 0.1
+    lr_scheduler: constant
     total_steps: 12000
