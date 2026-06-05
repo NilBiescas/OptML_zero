@@ -574,7 +574,7 @@ def main():
                 logits = base_out.logits.detach().requires_grad_(True)
                 del base_out
             with torch.enable_grad():
-                if opt_name == "PseuZO" and False:
+                if opt_name == "PseuZO":
                     # PseuZO calls closure twice per batch. The second call is for 
                     # perturbed outputs and does not need gradients. Skipping 
                     # the backward pass here saves ~3GB of memory.
