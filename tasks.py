@@ -160,9 +160,9 @@ def sst2_format_eval(ex, tokenizer):
 # --------------------------------------------------------------------------
 
 TASKS = {
-    "multirc": TaskSpec("multirc", "multirc", multirc_format_train, multirc_format_eval),
-    "copa":    TaskSpec("copa",    "copa",    copa_format_train,    copa_format_eval),
-    "sst2":    TaskSpec("sst2",    "sst2",    sst2_format_train,    sst2_format_eval, dataset_path="glue"),
+    "multirc": TaskSpec("multirc", "multirc", multirc_format_train, multirc_format_eval, dataset_path="aps/super_glue"),
+    "copa":    TaskSpec("copa",    "copa",    copa_format_train,    copa_format_eval,    dataset_path="aps/super_glue"),
+    "sst2":    TaskSpec("sst2",    "sst2",    sst2_format_train,    sst2_format_eval,    dataset_path="nyu-mll/glue"),
 }
 
 
