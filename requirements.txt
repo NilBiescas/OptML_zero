@@ -1,5 +1,7 @@
 torch>=2.1
-transformers>=4.40
+# Qwen3.5-0.8B is a Qwen3_5ForConditionalGeneration (multimodal) arch — needs a
+# recent transformers that registers model_type "qwen3_5". Bump if load fails.
+transformers>=4.49
 datasets>=2.18
 huggingface_hub>=0.22
 wandb>=0.17
