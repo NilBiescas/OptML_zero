@@ -172,7 +172,7 @@ def load_task(task_name: str, num_train: int, seed: int) -> Tuple[TaskSpec, Data
         raise ValueError(f"Unknown task '{task_name}'. Registered: {list(TASKS)}")
     spec = TASKS[task_name]
     path = getattr(spec, "dataset_path", "super_glue")
-    ds = load_dataset(path, spec.hf_subset, trust_remote_code=True)
+    ds = load_dataset(path, spec.hf_subset)
     if num_train and len(ds["train"]) > num_train:
         ds["train"] = ds["train"].shuffle(seed=seed).select(range(num_train))
     return spec, ds
