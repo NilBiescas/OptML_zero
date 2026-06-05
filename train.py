@@ -573,14 +573,41 @@ def main():
                 )
                 logits = base_out.logits.detach().requires_grad_(True)
             with torch.enable_grad():
-                shift_logits = logits[..., :-1, :].contiguous()
-                shift_labels = batch["labels"][..., 1:].contiguous()
-                loss_t = F.cross_entropy(
-                    shift_logits.view(-1, shift_logits.size(-1)),
-                    shift_labels.view(-1),
-                    ignore_index=-100,
-                )
-                grad_logits = torch.autograd.grad(loss_t, logits)[0].detach()
+                if opt_name == "PseuZO":
+                    # Chunk gradient computation over the batch dimension to avoid 
+                    # a massive peak memory spike during cross-entropy backprop.
+                    grad_logits = torch.zeros_like(logits)
+                    loss_sum = 0.0
+                    valid_tokens = (batch["labels"][..., 1:] != -100).sum().item()
+                    
+                    for i in range(logits.size(0)):
+                        # Small local graph for just 1 sequence
+                        l_i = logits[i:i+1].detach().requires_grad_(True)
+                        shift_l = l_i[..., :-1, :].contiguous()
+                        shift_lbl = batch["labels"][i:i+1, 1:].contiguous()
+                        
+                        loss_i = F.cross_entropy(
+                            shift_l.view(-1, shift_l.size(-1)), 
+                            shift_lbl.view(-1), 
+                            ignore_index=-100, 
+                            reduction='sum'
+                        )
+                        if loss_i.item() > 0:
+                            grad_logits[i:i+1] = torch.autograd.grad(loss_i, l_i)[0].detach()
+                        loss_sum += loss_i.item()
+                        
+                    loss_t = torch.tensor(loss_sum / max(1, valid_tokens), device=logits.device)
+                    grad_logits = grad_logits / max(1, valid_tokens)
+                else:
+                    shift_logits = logits[..., :-1, :].contiguous()
+                    shift_labels = batch["labels"][..., 1:].contiguous()
+                    loss_t = F.cross_entropy(
+                        shift_logits.view(-1, shift_logits.size(-1)),
+                        shift_labels.view(-1),
+                        ignore_index=-100,
+                    )
+                    grad_logits = torch.autograd.grad(loss_t, logits)[0].detach()
+                
             step_loss["v"] = loss_t.detach()
             return loss_t.detach(), logits.detach(), grad_logits
 
