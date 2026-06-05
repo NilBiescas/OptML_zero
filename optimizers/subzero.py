@@ -192,7 +192,7 @@ class SubZero(Optimizer):
                 if len(p.data.shape) == 2:
                     z0 = torch.normal(
                         mean=0, std=1,
-                        size=(self.gauss_rank, self.gauss_rank),
+                        size=(U.shape[1], V.shape[0]),
                         device=p.data.device, dtype=p.data.dtype,
                     )
                     z = (U @ z0 @ V * math.sqrt(p.data.numel() / z0.numel())).view(p.data.shape).to(p.data.dtype)
