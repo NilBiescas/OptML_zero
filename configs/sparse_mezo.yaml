@@ -16,7 +16,7 @@ training:
 optimizer:
   name: SparseMeZO
   kwargs:
-    lr: 1.0e-6
+    lr: 1.0e-7  # 1e-6 (paper OPT-13B default) causes degradation on Qwen3.5-0.8B; 1e-7 per RCP2 finding
     eps: 1.0e-3
     sparsity: 0.20        # 20% perturbed = paper's "sparsity 0.80"
     mask_mode: small_magnitude
