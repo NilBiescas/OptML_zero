@@ -25,6 +25,7 @@ class TaskSpec:
     hf_subset: str            # subset name passed to load_dataset("super_glue", ...)
     format_train: Callable    # (example, tokenizer) -> dict(input_ids, labels)
     format_eval:  Callable    # (example, tokenizer) -> dict(prompt_ids, candidates, gold_idx)
+    dataset_path: str = "super_glue" # hf dataset path (e.g. glue or super_glue)
 
 
 # --------------------------------------------------------------------------
@@ -122,12 +123,46 @@ def copa_format_eval(ex, tokenizer):
 
 
 # --------------------------------------------------------------------------
+# SST-2 — binary sentiment classification
+# --------------------------------------------------------------------------
+
+def _sst2_prompt(ex) -> str:
+    return f"{ex['sentence']}\nSentiment:"
+
+def sst2_format_train(ex, tokenizer):
+    prompt = _sst2_prompt(ex)
+    verb = " Positive" if ex["label"] == 1 else " Negative"
+    full = prompt + verb
+    prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
+    full_ids = tokenizer(full, add_special_tokens=False)["input_ids"]
+    labels = [-100] * len(prompt_ids) + full_ids[len(prompt_ids):]
+    while len(labels) < len(full_ids):
+        labels.append(-100)
+    labels = labels[:len(full_ids)]
+    return {"input_ids": full_ids, "labels": labels, "attention_mask": [1] * len(full_ids)}
+
+def sst2_format_eval(ex, tokenizer):
+    prompt = _sst2_prompt(ex)
+    prompt_ids = tokenizer(prompt, add_special_tokens=False)["input_ids"]
+    candidates = [
+        tokenizer(" Negative", add_special_tokens=False)["input_ids"],
+        tokenizer(" Positive", add_special_tokens=False)["input_ids"],
+    ]
+    return {
+        "prompt_ids": prompt_ids,
+        "candidates": candidates,
+        "gold_idx": int(ex["label"]),  # 0 → Negative, 1 → Positive
+    }
+
+
+# --------------------------------------------------------------------------
 # Registry — add a new SuperGLUE task here, no other code change needed.
 # --------------------------------------------------------------------------
 
 TASKS = {
     "multirc": TaskSpec("multirc", "multirc", multirc_format_train, multirc_format_eval),
     "copa":    TaskSpec("copa",    "copa",    copa_format_train,    copa_format_eval),
+    "sst2":    TaskSpec("sst2",    "sst2",    sst2_format_train,    sst2_format_eval, dataset_path="glue"),
 }
 
 
@@ -136,7 +171,8 @@ def load_task(task_name: str, num_train: int, seed: int) -> Tuple[TaskSpec, Data
     if task_name not in TASKS:
         raise ValueError(f"Unknown task '{task_name}'. Registered: {list(TASKS)}")
     spec = TASKS[task_name]
-    ds = load_dataset("super_glue", spec.hf_subset, trust_remote_code=True)
+    path = getattr(spec, "dataset_path", "super_glue")
+    ds = load_dataset(path, spec.hf_subset, trust_remote_code=True)
     if num_train and len(ds["train"]) > num_train:
         ds["train"] = ds["train"].shuffle(seed=seed).select(range(num_train))
     return spec, ds

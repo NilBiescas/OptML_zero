@@ -3,7 +3,7 @@
 Goal: run any of MeZO / Sparse-MeZO / LOZO / DiZO / HiZOO / QuZO / ZO-Muon /
 ConMeZO / FZOO / PseuZO / SubZero under the SAME setup (model, dataset,
 prompts, eval protocol) so the team's head-to-head numbers are apples-to-apples.
-The optimizer is selected via the YAML config; the task (multirc | copa) is
+The optimizer is selected via the YAML config; the task (multirc | copa | sst2) is
 selected via the --task CLI flag.
 
 Metrics logged to WandB (project `Zero-Order-Opt`):
@@ -27,7 +27,7 @@ WandB run name: {owner}-{method}-{task}-{mm_dd_hh_mm_ss}  (UTC)
 Usage:
   python train.py --config configs/mezo.yaml         --task multirc
   python train.py --config configs/sparse_mezo.yaml  --task copa
-  RUN_OWNER=nil python train.py --config configs/lozo.yaml --task multirc
+  RUN_OWNER=nil python train.py --config configs/lozo.yaml --task sst2
 """
 import argparse
 import importlib
@@ -112,8 +112,8 @@ def load_optimizer_cls(name: str):
 def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--config", required=True, help="Path to optimizer YAML")
-    p.add_argument("--task", required=True, choices=["multirc", "copa"],
-                   help="SuperGLUE task to train / evaluate on")
+    p.add_argument("--task", required=True, choices=["multirc", "copa", "sst2"],
+                   help="SuperGLUE / GLUE task to train / evaluate on")
     p.add_argument("--owner", default=None,
                    help="Run owner: maria | nil | cheng (falls back to $RUN_OWNER or yaml owner)")
     p.add_argument("--eval-batch-size", type=int, default=8,
