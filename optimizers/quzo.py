@@ -86,6 +86,9 @@ class QuZO(Optimizer):
                              already loaded in 8-bit via bitsandbytes, or
                              when only float norms/biases are trainable).
         quantized_perturb:   True → QuZO (quantised z̃); False → plain MeZO
+        num_pertub:          number of ZO gradient estimates to average per step.
+                             Each adds 2 forward passes. num_pertub=2 → 4 fwds/step,
+                             variance ÷√2. Paper default: 1.
         weight_decay:        L2 regularisation (paper: 0)
         lr_scheduler:        "constant" | "cosine" | "linear"
         lr_min_ratio:        final LR multiplier for cosine/linear decay
@@ -100,6 +103,7 @@ class QuZO(Optimizer):
         perturb_bits: int = 8,
         wbit: int = 32,
         quantized_perturb: bool = True,
+        num_pertub: int = 1,
         weight_decay: float = 0.0,
         lr_scheduler: str = "constant",
         lr_min_ratio: float = 0.1,
@@ -114,6 +118,7 @@ class QuZO(Optimizer):
         self.perturb_bits      = int(perturb_bits)
         self.wbit              = int(wbit)
         self.quantized_perturb = bool(quantized_perturb)
+        self.num_pertub        = max(1, int(num_pertub))
         self.lr_scheduler      = str(lr_scheduler)
         self.lr_min_ratio      = float(lr_min_ratio)
         self.total_steps       = int(total_steps)
@@ -179,57 +184,67 @@ class QuZO(Optimizer):
             if p.requires_grad
         ]
 
-        seed = np.random.randint(1_000_000_000)
+        # Collect num_pertub independent gradient estimates and average them.
+        # Each uses a fresh random seed, contributing 2 forward passes.
+        seeds = [np.random.randint(1_000_000_000) for _ in range(self.num_pertub)]
 
         with torch.no_grad():
-            # F(θ + εz̃)
-            self._perturb(trainable, seed, scale=+1.0)
-            loss1 = closure().detach()
+            loss_first = None
+            projected_grads = []
 
-            # F(θ − εz̃)
-            self._perturb(trainable, seed, scale=-2.0)
-            loss2 = closure().detach()
+            for seed in seeds:
+                # F(θ + εz̃)
+                self._perturb(trainable, seed, scale=+1.0)
+                loss1 = closure().detach()
+                if loss_first is None:
+                    loss_first = loss1
 
-            # Restore θ
-            self._perturb(trainable, seed, scale=+1.0)
+                # F(θ − εz̃)
+                self._perturb(trainable, seed, scale=-2.0)
+                loss2 = closure().detach()
 
-            projected_grad = ((loss1 - loss2) / (2.0 * zo_eps)).item()
+                # Restore θ
+                self._perturb(trainable, seed, scale=+1.0)
 
-            # Parameter update — SAME seed + SAME _quantise_z → SAME z̃ as perturb
-            torch.manual_seed(seed)
-            for p in trainable:
-                pid = getattr(p, "param_id", id(p) % (2**31))
-                z_fp = torch.normal(0.0, 1.0, size=p.data.size(),
-                                    device=p.data.device,
-                                    dtype=p.data.dtype if p.data.is_floating_point()
-                                          else torch.float32)
-                z_eff = self._quantise_z(z_fp, seed, pid)
-                grad = projected_grad * z_eff
+                projected_grads.append(((loss1 - loss2) / (2.0 * zo_eps)).item())
 
-                if p.data.is_floating_point():
-                    if weight_decay != 0.0:
-                        grad = grad + weight_decay * p.data
-                    p.data.add_(-zo_lr * grad)
-                else:
-                    p_f = p.data.float()
-                    if weight_decay != 0.0:
-                        grad = grad + weight_decay * p_f
-                    p.data = (p_f - zo_lr * grad).to(p.data.dtype)
+            # Apply accumulated updates from all perturbations (averaged).
+            for seed, pg in zip(seeds, projected_grads):
+                torch.manual_seed(seed)
+                for p in trainable:
+                    pid = getattr(p, "param_id", id(p) % (2**31))
+                    z_fp = torch.normal(0.0, 1.0, size=p.data.size(),
+                                        device=p.data.device,
+                                        dtype=p.data.dtype if p.data.is_floating_point()
+                                              else torch.float32)
+                    z_eff = self._quantise_z(z_fp, seed, pid)
+                    grad = (pg / self.num_pertub) * z_eff
 
-                # Weight re-quantisation — only if explicitly enabled (wbit < 32)
-                # and param is floating-point. Disabled by default: with fp16 model
-                # and LR=1e-7, quantisation noise >> gradient signal per step.
-                if self.wbit < 32 and p.data.is_floating_point():
-                    q, scale_w = _zo_quant_sym(p.data, nbits=self.wbit, stochastic=False)
-                    p.data = _zo_dequant(q, scale_w).to(p.data.dtype)
+                    if p.data.is_floating_point():
+                        if weight_decay != 0.0:
+                            grad = grad + (weight_decay / self.num_pertub) * p.data
+                        p.data.add_(-zo_lr * grad)
+                    else:
+                        p_f = p.data.float()
+                        if weight_decay != 0.0:
+                            grad = grad + (weight_decay / self.num_pertub) * p_f
+                        p.data = (p_f - zo_lr * grad).to(p.data.dtype)
+
+            # Weight re-quantisation after all updates applied.
+            if self.wbit < 32:
+                for p in trainable:
+                    if p.data.is_floating_point():
+                        q, scale_w = _zo_quant_sym(p.data, nbits=self.wbit, stochastic=False)
+                        p.data = _zo_dequant(q, scale_w).to(p.data.dtype)
 
         self._step += 1
 
+        avg_pg = sum(projected_grads) / len(projected_grads)
         self.last_metrics = {
-            "loss_plus":      float(loss1.item()),
-            "loss_minus":     float(loss2.item()),
-            "projected_grad": projected_grad,
-            "lr_effective":   zo_lr,
+            "loss_plus":       float(loss_first.item()),
+            "projected_grad":  avg_pg,
+            "lr_effective":    zo_lr,
+            "num_pertub":      self.num_pertub,
         }
 
-        return loss1
+        return loss_first
