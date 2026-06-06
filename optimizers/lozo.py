@@ -70,7 +70,7 @@ class LOZO(Optimizer):
                     m=p.data.size(0), n=self.rank_r,
                     device=p.data.device, dtype=p.data.dtype,
                 )
-                p.data = p.data + scaling_factor * (u @ v.t()) * zo_eps
+                p.data = p.data + scaling_factor * (u @ v.t()) / math.sqrt(self.rank_r) * zo_eps
             else:
                 z = torch.normal(
                     mean=0, std=1, size=p.data.size(),
@@ -136,9 +136,9 @@ class LOZO(Optimizer):
                         device=p.data.device, dtype=p.data.dtype,
                     )
                     if "bias" not in name and "layer_norm" not in name and "layernorm" not in name:
-                        p.data = p.data - zo_lr * (projected_grad * (u @ v.t()) + weight_decay * p.data)
+                        p.data = p.data - zo_lr * (projected_grad * (u @ v.t()) / math.sqrt(self.rank_r) + weight_decay * p.data)
                     else:
-                        p.data = p.data - zo_lr * (projected_grad * (u @ v.t()))
+                        p.data = p.data - zo_lr * (projected_grad * (u @ v.t()) / math.sqrt(self.rank_r))
                 else:
                     z = torch.normal(
                         mean=0, std=1, size=p.data.size(),
