@@ -15,7 +15,7 @@ training:
 optimizer:
   name: LOZO
   kwargs:
-    lr: 1e-7              
+    lr: 1e-10            
     eps: 1e-4
     weight_decay: 0.0
     rank_r: 4             

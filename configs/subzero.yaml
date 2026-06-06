@@ -15,7 +15,7 @@ training:
 optimizer:
   name: SubZero
   kwargs:
-    lr: 1e-5            
+    lr: 1e-11            
     eps: 1e-4
     weight_decay: 0.0
     gauss_rank: 24       
