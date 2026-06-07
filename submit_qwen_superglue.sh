@@ -99,7 +99,7 @@ runai submit \
     if su -p lichen -c "test -w /home/lichen/zo-ckpts"; then CKPT=/home/lichen/zo-ckpts; else CKPT=/workspace/zo-ckpts; mkdir -p "$CKPT"; chown -R 316680:30204 "$CKPT"; fi
     echo "[ckpt-dir] using: $CKPT (run as lichen)"
     set -e
-    su -p lichen -c "cd $(pwd) && HF_HOME=/tmp/hf HF_HUB_ENABLE_HF_TRANSFER=1 python train.py --config configs/${METHOD}.yaml --task ${TASK} --owner chengheng --ckpt-dir $CKPT"
+    su -p lichen -c "cd $(pwd) && export PATH=/opt/conda/bin:/usr/bin:/bin && HF_HOME=/tmp/hf HF_HUB_ENABLE_HF_TRANSFER=1 /opt/conda/bin/python train.py --config configs/${METHOD}.yaml --task ${TASK} --owner chengheng --ckpt-dir $CKPT"
   '
 
 cat <<EOF
