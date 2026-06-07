@@ -56,6 +56,7 @@ runai submit \
   --node-pools "${NODE}" \
   --preemptible \
   --existing-pvc claimname=dlab-scratch,path=/scratch \
+  --existing-pvc claimname=home,path=/pvc_home \
   --environment HF_HUB_ENABLE_HF_TRANSFER=1 \
   --environment WANDB_API_KEY="${WANDB_API_KEY}" \
   --environment WANDB_ENTITY="${WANDB_ENTITY:-pilligua}" \
@@ -78,13 +79,26 @@ runai submit \
     # float8_e8m0fnu / ModuleNotFoundError: Qwen3_5ForCausalLM.
     pip install --quiet "torch==2.7.1" --index-url https://download.pytorch.org/whl/cu126
     pip install --quiet -r requirements.txt hf_transfer
-    # Checkpoints (best + rolling last) live on the durable dlab-scratch PVC at
-    # /scratch/chengheng/zo-ckpts/<owner>-<method>-<task>/. The harness
-    # auto-resumes from last/ if present, continuing the SAME wandb run and the
-    # last step — so a preempted + relaunched job picks up where it left off.
-    mkdir -p /scratch/chengheng/zo-ckpts
+    # Pick a WRITABLE checkpoint dir. Pods run as root but the NFS uses
+    # root_squash, so the lichen-owned scratch roots are not writable. Probe a
+    # few candidates (a 777 dir pre-created on the home PVC is the durable one
+    # that survives preemption + enables auto-resume); fall back to ephemeral
+    # local storage so the run NEVER dies at the checkpoint step. The harness
+    # auto-resumes from <ckpt>/<owner>-<method>-<task>/last/ if present,
+    # continuing the SAME wandb run + last step.
+    set +e
+    CKPT=""
+    for c in /pvc_home/scratch/chengheng/zo-ckpts \
+             /pvc_home/lichen/scratch/chengheng/zo-ckpts \
+             /pvc_home/chengheng/zo-ckpts \
+             /scratch/chengheng/zo-ckpts; do
+      if mkdir -p "$c/.wtest" 2>/dev/null && rmdir "$c/.wtest" 2>/dev/null; then CKPT="$c"; break; fi
+    done
+    [ -z "$CKPT" ] && CKPT=/workspace/zo-ckpts && mkdir -p "$CKPT"
+    echo "[ckpt-dir] using: $CKPT"
+    set -e
     python train.py --config "configs/${METHOD}.yaml" --task "${TASK}" --owner chengheng \
-      --ckpt-dir /scratch/chengheng/zo-ckpts
+      --ckpt-dir "$CKPT"
   '
 
 cat <<EOF
