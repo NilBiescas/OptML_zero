@@ -73,7 +73,7 @@ runai submit \
     # torch.float8_e8m0fnu, which only exists in torch>=2.7. Without this the
     # run dies at model load with AttributeError: module torch has no attribute
     # float8_e8m0fnu / ModuleNotFoundError: Qwen3_5ForCausalLM.
-    pip install --quiet --upgrade torch --index-url https://download.pytorch.org/whl/cu126
+    pip install --quiet "torch==2.7.1" --index-url https://download.pytorch.org/whl/cu126
     pip install --quiet -r requirements.txt hf_transfer
     python train.py --config "configs/${METHOD}.yaml" --task "${TASK}" --owner chengheng
   '
