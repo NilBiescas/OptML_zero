@@ -470,40 +470,41 @@ def main():
     # ---- WandB: resume the SAME run if we're picking up a prior ckpt ------
     resumed_run_id   = (resume_meta or {}).get("wandb_run_id")
     resumed_run_name = (resume_meta or {}).get("run_name")
+    _wandb_base = dict(
+        project="Zero-Order-Opt",
+        entity="pilligua",   # team workspace — overrides any WANDB_ENTITY env
+        group=args.task,     # group all multirc / all copa together
+        tags=[owner, opt_name, args.task] + _extra_tags,
+        config={**cfg, "task": args.task, "owner": owner,
+                "_resolved_seed": seed,
+                "_resolved_dtype": dtype_str,
+                "_resumed_from":   args.resume_from,
+                "_hub_push":       push_to_hub,
+                "_hub_repo_id":    hub_repo_id},
+        settings=wandb.Settings(init_timeout=120),
+    )
+    run = None
     if resumed_run_id and resumed_run_name:
-        run_name = resumed_run_name
-        wandb.init(
-            project="Zero-Order-Opt",
-            entity="pilligua",   # team workspace — overrides any WANDB_ENTITY env
-            id=resumed_run_id,
-            resume="allow",
-            name=run_name,
-            group=args.task,
-            tags=[owner, opt_name, args.task] + _extra_tags,
-            config={**cfg, "task": args.task, "owner": owner,
-                    "_resolved_seed": seed,
-                    "_resolved_dtype": dtype_str,
-                    "_resumed_from":   args.resume_from,
-                    "_hub_push":       push_to_hub,
-                    "_hub_repo_id":    hub_repo_id},
-        )
-        print(f"[Resume] continuing WandB run id={resumed_run_id} name={run_name}")
-    else:
+        # Try to continue the SAME run. But if that run was deleted on the
+        # server (or wandb is unreachable), resuming it hangs until timeout and
+        # would CRASH the job — so fall back to a fresh run instead of dying.
+        try:
+            run = wandb.init(id=resumed_run_id, resume="allow",
+                             name=resumed_run_name, **_wandb_base)
+            run_name = resumed_run_name
+            print(f"[Resume] continuing WandB run id={resumed_run_id} name={run_name}")
+        except Exception as e:
+            print(f"[Resume] WARNING: could not resume WandB run {resumed_run_id} "
+                  f"({type(e).__name__}: {e}); starting a FRESH run instead.")
+            try:
+                wandb.finish(exit_code=1)
+            except Exception:
+                pass
+            run = None
+    if run is None:
         stamp    = datetime.now(timezone.utc).strftime("%m_%d_%H_%M_%S")
         run_name = f"{owner}-{opt_name}-{args.task}-{stamp}"
-        wandb.init(
-            project="Zero-Order-Opt",
-            entity="pilligua",   # team workspace — overrides any WANDB_ENTITY env
-            name=run_name,
-            group=args.task,                          # group all multirc / all copa together
-            tags=[owner, opt_name, args.task] + _extra_tags,        # filter in the dashboard
-            config={**cfg, "task": args.task, "owner": owner,
-                    "_resolved_seed": seed,
-                    "_resolved_dtype": dtype_str,
-                    "_resumed_from":   args.resume_from,
-                    "_hub_push":       push_to_hub,
-                    "_hub_repo_id":    hub_repo_id},
-        )
+        run = wandb.init(name=run_name, **_wandb_base)
 
     # ---- Load task data ---------------------------------------------------
     spec, ds = load_task(args.task, num_train=num_train, seed=seed)
