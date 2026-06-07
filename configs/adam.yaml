@@ -22,7 +22,9 @@ training:
 
 optimizer:
   name: AdamW
-  kwargs: {}        # default lr (1e-3), default betas/eps/weight_decay
+  kwargs:
+    lr: 1.0e-5      # paper-optimal full-fine-tune LR for a sub-1B LLM
+                    # (MeZO paper's Adam/FT baseline uses 1e-5); default betas/eps/wd
 
 hub:
   push_to_hub: false
