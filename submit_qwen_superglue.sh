@@ -68,6 +68,12 @@ runai submit \
     git clone https://github.com/NilBiescas/OptML_zero.git
     cd OptML_zero
     git checkout "${BRANCH}"
+    # Upgrade torch to >=2.7 (cu126) FIRST: the image ships torch 2.6.0, but the
+    # current transformers (needed for Qwen3.5 / Qwen3_5ForCausalLM) imports
+    # torch.float8_e8m0fnu, which only exists in torch>=2.7. Without this the
+    # run dies at model load with AttributeError: module torch has no attribute
+    # float8_e8m0fnu / ModuleNotFoundError: Qwen3_5ForCausalLM.
+    pip install --quiet --upgrade torch --index-url https://download.pytorch.org/whl/cu126
     pip install --quiet -r requirements.txt hf_transfer
     python train.py --config "configs/${METHOD}.yaml" --task "${TASK}" --owner chengheng
   '
