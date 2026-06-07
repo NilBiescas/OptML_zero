@@ -2,7 +2,7 @@
 # Implementation: optimizers/mezo.py — ported from Cheng's `chenghengli` branch
 # (validated on OPT-1.3B/SST-2 at 92.3% test). The reference ZO method every
 # other optimizer here is measured against.
-owner: cheng
+owner: chengheng
 
 model:
   name: Qwen/Qwen3.5-0.8B

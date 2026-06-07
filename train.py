@@ -305,9 +305,10 @@ def main():
         cfg = yaml.safe_load(f)
 
     owner = args.owner or os.environ.get("RUN_OWNER") or cfg.get("owner")
-    if owner not in {"maria", "nil", "cheng"}:
+    if owner not in {"maria", "nil", "cheng", "chengheng"}:
         raise ValueError(
-            f"--owner / RUN_OWNER / config 'owner' must be one of maria|nil|cheng (got {owner!r})"
+            f"--owner / RUN_OWNER / config 'owner' must be one of "
+            f"maria|nil|cheng|chengheng (got {owner!r})"
         )
 
     opt_name   = cfg["optimizer"]["name"]

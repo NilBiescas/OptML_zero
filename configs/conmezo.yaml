@@ -4,7 +4,7 @@
 # branch (validated on OPT-1.3B/SST-2). Cone uses a GLOBAL ||mu|| direction
 # with cos on the parallel (momentum) component, sin on the orthogonal random
 # component, plus the paper §3.4 beta warm-up schedule.
-owner: cheng
+owner: chengheng
 
 model:
   name: Qwen/Qwen3.5-0.8B

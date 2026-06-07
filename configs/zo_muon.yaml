@@ -5,7 +5,7 @@
 # orthogonalization, applied at lr. 1D weights (bias/LayerNorm): plain MeZO at
 # the much smaller lr_1d. No Muon RMS rescale (paper lr=1e-2 is calibrated for
 # the un-rescaled orthogonalized update).
-owner: cheng
+owner: chengheng
 
 model:
   name: Qwen/Qwen3.5-0.8B

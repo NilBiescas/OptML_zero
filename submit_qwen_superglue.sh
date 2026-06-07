@@ -59,7 +59,7 @@ runai submit \
   --environment WANDB_API_KEY="${WANDB_API_KEY}" \
   --environment WANDB_ENTITY="${WANDB_ENTITY:-pilligua}" \
   --environment WANDB_PROJECT="Zero-Order-Opt" \
-  --environment RUN_OWNER="cheng" \
+  --environment RUN_OWNER="chengheng" \
   --environment METHOD="${METHOD}" \
   --environment TASK="${TASK}" \
   --environment BRANCH="${BRANCH}" \
@@ -69,7 +69,7 @@ runai submit \
     cd OptML_zero
     git checkout "${BRANCH}"
     pip install --quiet -r requirements.txt hf_transfer
-    python train.py --config "configs/${METHOD}.yaml" --task "${TASK}" --owner cheng
+    python train.py --config "configs/${METHOD}.yaml" --task "${TASK}" --owner chengheng
   '
 
 cat <<EOF

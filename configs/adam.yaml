@@ -2,7 +2,7 @@
 # Uses real backprop (forward + backward + step) via the first-order path in
 # train.py. Data, eval (logit_accuracy), and train-only-time logging are
 # IDENTICAL to the ZO runs, so the accuracy is directly comparable.
-owner: cheng
+owner: chengheng
 
 model:
   name: Qwen/Qwen3.5-0.8B

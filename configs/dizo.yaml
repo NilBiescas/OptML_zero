@@ -4,7 +4,7 @@
 # steps Phase 2 ZO-optimizes a per-layer scalar gamma for Q/V attention weights
 # and rescales each layer's divergence from the pretrained anchor. Q/V layers
 # are found via p.param_name (the harness injects param_name — train.py:449).
-owner: cheng
+owner: chengheng
 
 model:
   name: Qwen/Qwen3.5-0.8B
