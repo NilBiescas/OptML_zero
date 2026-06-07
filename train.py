@@ -40,6 +40,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import torch
+import torch.optim.lr_scheduler
 import torch.nn.functional as F
 import wandb
 import yaml
