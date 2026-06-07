@@ -94,7 +94,14 @@ runai submit \
     # model download off any PVC quota.
     set +e
     groupadd -g 30204 lichen 2>/dev/null || true
-    id -u lichen >/dev/null 2>&1 || useradd -u 316680 -g 30204 -d /tmp/lhome -M -s /bin/bash lichen
+    # /dlab-scratch/dlabscratch1 is mode drwxrws--T owned by group 60220
+    # (dlab_AppGrpU): only members of gid 60220 can traverse + write. On the
+    # login node lichen has this supplementary group, but a fresh useradd in the
+    # pod would only give the primary group (30204), so lichen must be added to
+    # 60220 explicitly or every dlab-scratch write is Permission-denied.
+    groupadd -g 60220 dlabgrp 2>/dev/null || true
+    id -u lichen >/dev/null 2>&1 || useradd -u 316680 -g 30204 -G 60220 -d /tmp/lhome -M -s /bin/bash lichen
+    usermod -aG 60220 lichen 2>/dev/null || true
     chown -R 316680:30204 "$(pwd)" 2>/dev/null
     CKPT=""
     for d in /dlab-scratch/dlabscratch1/chengheng/zo-optim /dlab-scratch/chengheng/zo-optim /dlab-scratch/zo-optim; do
