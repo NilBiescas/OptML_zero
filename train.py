@@ -220,7 +220,8 @@ def evaluate(model, tokenizer, val_examples, spec, device, eval_batch_size=8):
 # Checkpointing
 # --------------------------------------------------------------------------
 def save_checkpoint(model, tokenizer, optimizer, dest_dir: Path,
-                    meta: dict, source_cfg_path: str | None = None):
+                    meta: dict, source_cfg_path: str | None = None,
+                    scheduler=None):
     """Persist model + tokenizer + optimizer state + meta + resolved YAML.
 
     The YAML copy (+ git SHA in meta) makes any saved checkpoint
@@ -240,6 +241,11 @@ def save_checkpoint(model, tokenizer, optimizer, dest_dir: Path,
         # Some custom optimizer states (closures, non-tensor objects) don't
         # pickle cleanly — record the failure but keep the rest of the ckpt.
         print(f"[ckpt] optimizer.state_dict() save failed at {dest_dir}: {e}")
+    if scheduler is not None:
+        try:
+            torch.save(scheduler.state_dict(), dest_dir / "scheduler.pt")
+        except Exception as e:
+            print(f"[ckpt] scheduler.state_dict() save failed at {dest_dir}: {e}")
     if source_cfg_path:
         try:
             shutil.copy(source_cfg_path, dest_dir / "config.yaml")
@@ -480,6 +486,17 @@ def main():
     print(f"[Opt] {opt_name}({opt_kwargs})  "
           f"{'(first-order, backprop)' if is_first_order else '(zeroth-order, closure)'}")
 
+    # ---- Scheduler --------------------------------------------------------
+    use_cosine_scheduler = cfg.get("optimizer", {}).get("use_cosine_scheduler", False)
+    if use_cosine_scheduler:
+        initial_step = int(resume_meta["total_steps"]) if resume_meta else 0
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=max_steps, last_epoch=initial_step - 1
+        )
+        print(f"[Scheduler] CosineAnnealingLR enabled (T_max={max_steps}, initial_step={initial_step})")
+    else:
+        scheduler = None
+
     # ---- Resume optimizer state (best-effort) ----------------------------
     if args.resume_from:
         opt_state_path = Path(args.resume_from) / "optimizer.pt"
@@ -492,6 +509,15 @@ def main():
         else:
             print(f"[Resume] no optimizer.pt at {opt_state_path}; "
                   "ZO RNG seeds will re-derive from global_step")
+                  
+        if scheduler is not None:
+            sched_state_path = Path(args.resume_from) / "scheduler.pt"
+            if sched_state_path.exists():
+                try:
+                    scheduler.load_state_dict(torch.load(sched_state_path, weights_only=False))
+                    print(f"[Resume] loaded scheduler state from {sched_state_path}")
+                except Exception as e:
+                    print(f"[Resume] could not load scheduler state ({e}); continuing fresh")
 
     # ---- Budget bookkeeping ----------------------------------------------
     steps_per_epoch = max(1, math.ceil(len(train_packs) / batch_size))
@@ -647,6 +673,10 @@ def main():
             step_forwards["n"] = 1
         else:
             optimizer.step(closure)
+            
+        if scheduler is not None:
+            scheduler.step()
+            
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         dt = time.perf_counter() - t0
@@ -666,6 +696,7 @@ def main():
 
         log = {
             "train/loss":               loss_val,
+            "train/lr":                 scheduler.get_last_lr()[0] if scheduler is not None else optimizer.param_groups[0]["lr"],
             "train/step_time_sec":      dt,
             "train/avg_step_time_sec":  sum(step_times) / len(step_times),
             "train/step":               global_step,
@@ -724,7 +755,8 @@ def main():
                     "git_sha":        _git_sha(),
                 }
                 save_checkpoint(model, tokenizer, optimizer, best_dir,
-                                best_meta, source_cfg_path=args.config)
+                                best_meta, source_cfg_path=args.config,
+                                scheduler=scheduler)
                 wandb.log({
                     "best_eval/logit_accuracy": best["logit_accuracy"],
                     "best_eval/token_accuracy": best["token_accuracy"],
@@ -756,7 +788,8 @@ def main():
         "git_sha":        _git_sha(),
     }
     save_checkpoint(model, tokenizer, optimizer, last_dir,
-                    final_meta, source_cfg_path=args.config)
+                    final_meta, source_cfg_path=args.config,
+                    scheduler=scheduler)
 
     # ---- HF Hub: push best + last ONCE, only at end of training ----
     # Doing this here (instead of on every new best) means the run isn't

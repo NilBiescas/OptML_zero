@@ -1,7 +1,7 @@
 owner: nil
 
 model:
-  name: Qwen/Qwen3.5-0.8B
+  name: Qwen/Qwen2.5-0.5B
   dtype: bfloat16
 
 training:
@@ -14,8 +14,9 @@ training:
 
 optimizer:
   name: PseuZO
+  use_cosine_scheduler: true
   kwargs:
-    lr: 1e-9              # matches submit_pseuzo.sh LR
+    lr: 1e-7              # matches submit_pseuzo.sh LR
     eps: 1e-4
     weight_decay: 0.0
     sliding_window_length: 6

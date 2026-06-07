@@ -1,7 +1,7 @@
 owner: nil
 
 model:
-  name: Qwen/Qwen3.5-0.8B
+  name: Qwen/Qwen2.5-0.5B
   dtype: float32
 
 training:
@@ -14,12 +14,13 @@ training:
 
 optimizer:
   name: SubZero
+  use_cosine_scheduler: true
   kwargs:
     lr: 1e-7            
-    eps: 1e-5
+    eps: 1e-3
     weight_decay: 0.00
     gauss_rank: 24       
-    update_interval: 100 
+    update_interval: 1000 
     perturbation_mode: two_side
     mode: full
 
