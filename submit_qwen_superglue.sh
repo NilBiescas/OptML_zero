@@ -60,6 +60,7 @@ runai submit \
   --environment WANDB_API_KEY="${WANDB_API_KEY}" \
   --environment WANDB_ENTITY="${WANDB_ENTITY:-pilligua}" \
   --environment WANDB_PROJECT="Zero-Order-Opt" \
+  --environment WANDB_MODE="${WANDB_MODE:-online}" \
   --environment RUN_OWNER="chengheng" \
   --environment RUN_TAGS="${RUN_TAGS:-}" \
   --environment METHOD="${METHOD}" \
