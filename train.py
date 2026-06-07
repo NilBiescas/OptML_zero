@@ -612,6 +612,16 @@ def main():
         collate_fn=lambda b: pad_collate(b, tokenizer.pad_token_id),
     )
 
+    # First-order (AdamW) does REAL backprop, so it needs the full autograd
+    # graph + grads + optimizer moments — unlike the forward-only ZO methods.
+    # fp32 full fine-tuning of the 0.8B model at bs=16 over MultiRC's long
+    # sequences OOMs an 80GB H100 without this. Gradient checkpointing trades
+    # recompute for a large activation-memory saving so bs=16 fits.
+    if is_first_order and hasattr(model, "gradient_checkpointing_enable"):
+        model.config.use_cache = False
+        model.gradient_checkpointing_enable()
+        print("[first-order] gradient checkpointing enabled (fit bs=16 fp32)")
+
     # ---- Optimizer --------------------------------------------------------
     if is_first_order:
         optimizer = _FIRST_ORDER[opt_name](model.parameters(), **opt_kwargs)
