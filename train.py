@@ -119,6 +119,10 @@ def parse_args():
     p.add_argument("--max-steps", type=int, default=None,
                    help="Override training.max_steps from the YAML (e.g. fewer steps "
                         "for the tiny 400-example COPA set). None = use the YAML value.")
+    p.add_argument("--set", action="append", default=None, metavar="KEY=VALUE",
+                   help="Override an optimizer.kwargs entry (repeatable), e.g. "
+                        "--set cone_warmup_total=4000 --set refresh_T=100. Values are "
+                        "parsed as bool/int/float when possible, else kept as strings.")
     return p.parse_args()
 
 
@@ -353,6 +357,24 @@ def main():
     if args.lr is not None:
         print(f"[lr-override] {opt_name} lr {opt_kwargs.get('lr')} -> {args.lr}")
         opt_kwargs["lr"] = args.lr
+    # Generic per-run kwargs overrides (repeatable --set key=value), for
+    # task-specific tuning of method kwargs (e.g. COPA: cone_warmup_total to
+    # match a shorter max_steps, refresh_T for ZO-Muon).
+    for _kv in (args.set or []):
+        _k, _, _vs = _kv.partition("=")
+        _k, _vs = _k.strip(), _vs.strip()
+        if _vs.lower() in ("true", "false"):
+            _val = _vs.lower() == "true"
+        else:
+            try:
+                _val = int(_vs)
+            except ValueError:
+                try:
+                    _val = float(_vs)
+                except ValueError:
+                    _val = _vs
+        print(f"[set-override] {opt_name} {_k} {opt_kwargs.get(_k)} -> {_val!r}")
+        opt_kwargs[_k] = _val
     # First-order baselines (AdamW/Adam/SGD) for reference: they use real
     # backprop, not the ZO closure. Everything else (data, eval, logging) is
     # identical, so the accuracy is directly comparable to the ZO methods.
