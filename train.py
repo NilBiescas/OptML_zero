@@ -127,6 +127,14 @@ def parse_args():
                    help="Benchmark the UNTRAINED base model: load it, run a single "
                         "eval on the task, log to WandB as '<owner>-base-<task>', exit. "
                         "No training, no optimizer. Gives the zero-shot baseline.")
+    p.add_argument("--lr-scheduler", default=None,
+                   choices=["constant", "warmup_constant", "cosine", "linear"],
+                   help="LR schedule (overrides training.lr_scheduler). The ZO papers "
+                        "use constant LR; warmup_constant/cosine/linear add a linear "
+                        "warmup + optional decay. Default constant.")
+    p.add_argument("--warmup-ratio", type=float, default=None,
+                   help="Fraction of max_steps for linear LR warmup (overrides "
+                        "training.warmup_ratio; default 0).")
     return p.parse_args()
 
 
@@ -281,6 +289,24 @@ def _read_meta(meta_path: Path):
         return None
 
 
+def _lr_factor(step: int, max_steps: int, sched: str, warmup_steps: int) -> float:
+    """Multiplicative LR factor at `step` (0-indexed) for a warmup + decay
+    schedule. Linear warmup to 1.0 over warmup_steps, then constant / cosine /
+    linear decay. The ZO optimizers read group['lr'] each step, so scaling it
+    here schedules every method uniformly."""
+    if warmup_steps > 0 and step < warmup_steps:
+        return (step + 1) / warmup_steps
+    if sched in ("constant", "warmup_constant"):
+        return 1.0
+    denom = max(1, max_steps - warmup_steps)
+    prog  = min(1.0, max(0.0, (step - warmup_steps) / denom))
+    if sched == "cosine":
+        return 0.5 * (1.0 + math.cos(math.pi * prog))
+    if sched == "linear":
+        return max(0.0, 1.0 - prog)
+    return 1.0
+
+
 def _git_sha() -> str | None:
     """Best-effort git SHA of the repo train.py lives in (None if not a repo)."""
     try:
@@ -398,6 +424,13 @@ def main():
         print(f"[max-steps-override] {max_steps} -> {args.max_steps}")
         max_steps = args.max_steps
     eval_steps = cfg.get("training", {}).get("eval_steps", 500)
+    # ---- LR scheduler (default constant = ZO-paper convention) ------------
+    lr_sched = (args.lr_scheduler
+                or cfg.get("training", {}).get("lr_scheduler") or "constant")
+    warmup_ratio = (args.warmup_ratio if args.warmup_ratio is not None
+                    else cfg.get("training", {}).get("warmup_ratio", 0.0))
+    warmup_steps = int(warmup_ratio * max_steps)
+    print(f"[lr-sched] {lr_sched}  warmup_ratio={warmup_ratio}  warmup_steps={warmup_steps}")
     num_train  = cfg.get("training", {}).get("num_train", 1000)
     num_eval   = cfg.get("training", {}).get("num_eval", 1000)
     model_name = cfg.get("model", {}).get("name", "Qwen/Qwen3.5-0.8B")
@@ -585,6 +618,10 @@ def main():
     else:
         optimizer = opt_cls(model.parameters(), **opt_kwargs)
     print(f"[Opt] {opt_name}({opt_kwargs})  first_order={is_first_order}")
+    # Base LRs captured for the scheduler (the optimizer reads group['lr'] /
+    # group['lr_1d'] each step, so we rescale them in the loop).
+    base_lr    = opt_kwargs.get("lr")
+    base_lr_1d = opt_kwargs.get("lr_1d")
 
     # ---- Resume optimizer state (best-effort) ----------------------------
     if args.resume_from:
@@ -690,6 +727,19 @@ def main():
             step_loss["v"] = loss_t.detach()
             return loss_t.detach(), last_hidden.detach(), last_hidden.grad.detach()
 
+        # ---- LR schedule: rescale the optimizer lr before this step. All ZO
+        #      opts read group['lr'] dynamically (ZOMuon also group['lr_1d']).
+        if lr_sched != "constant" or warmup_steps > 0:
+            _f = _lr_factor(global_step, max_steps, lr_sched, warmup_steps)
+            for _g in optimizer.param_groups:
+                if base_lr is not None:
+                    _g["lr"] = base_lr * _f
+                if base_lr_1d is not None and "lr_1d" in _g:
+                    _g["lr_1d"] = base_lr_1d * _f
+            cur_lr = (base_lr * _f) if base_lr is not None else None
+        else:
+            cur_lr = base_lr
+
         t0 = time.perf_counter()
         if is_first_order:
             # Standard first-order step: forward + backward + update. Train
@@ -725,6 +775,7 @@ def main():
 
         log = {
             "train/loss":               loss_val,
+            "train/lr":                 cur_lr if cur_lr is not None else 0.0,
             "train/step_time_sec":      dt,
             "train/avg_step_time_sec":  sum(step_times) / len(step_times),
             # Cumulative TRAINING-ONLY wall time: sum of per-step optimizer.step
