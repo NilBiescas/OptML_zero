@@ -55,7 +55,7 @@ runai submit \
   --large-shm \
   --node-pools "${NODE}" \
   --preemptible \
-  --existing-pvc claimname=home,path=/home/lichen \
+  --existing-pvc claimname=dlab-scratch,path=/dlab-scratch \
   --environment HF_HUB_ENABLE_HF_TRANSFER=1 \
   --environment WANDB_API_KEY="${WANDB_API_KEY}" \
   --environment WANDB_ENTITY="${WANDB_ENTITY:-pilligua}" \
@@ -78,25 +78,29 @@ runai submit \
     # float8_e8m0fnu / ModuleNotFoundError: Qwen3_5ForCausalLM.
     pip install --quiet "torch==2.7.1" --index-url https://download.pytorch.org/whl/cu126
     pip install --quiet -r requirements.txt hf_transfer
-    # Pick a WRITABLE checkpoint dir. Pods run as root but the NFS uses
-    # root_squash, so the lichen-owned scratch roots are not writable. Probe a
-    # few candidates (a 777 dir pre-created on the home PVC is the durable one
-    # that survives preemption + enables auto-resume); fall back to ephemeral
-    # local storage so the run NEVER dies at the checkpoint step. The harness
-    # auto-resumes from <ckpt>/<owner>-<method>-<task>/last/ if present,
-    # continuing the SAME wandb run + last step.
-    # Run training as the submitting user (lichen, uid 316680) so checkpoints
-    # written to the NFS home PVC are NOT root-squashed. NFS root_squash only
-    # maps uid 0 -> nobody; uid 316680 maps to lichen, who owns /home/lichen,
-    # so it can write there. Checkpoints land durably in /home/lichen/zo-ckpts
-    # and survive preemption (auto-resume). HF_HOME -> /tmp keeps the model
-    # download off the home quota.
+    # Checkpoints go to the dlab-scratch PVC (claimname=dlab-scratch, 100Ti,
+    # mounted at /dlab-scratch) -- NOT the home PVC, which has only a ~100GB
+    # user quota that filled up with fp32 Qwen checkpoints (3.2GB each) and
+    # truncated a checkpoint write mid-flight, leaving an empty training_meta
+    # that crash-looped every auto-resume. dlab-scratch has terabytes free.
+    # Run training as lichen (uid 316680): NFS root_squash maps uid 0 -> nobody,
+    # but uid 316680 maps to lichen, who OWNS
+    # /mnt/dlab/scratch/dlabscratch1/chengheng/zo-optim and can write there.
+    # Probe the in-pod mount path (PVC root may or may not include the
+    # dlabscratch1/ prefix); fall back to ephemeral local disk so the run NEVER
+    # dies at the checkpoint step. The harness auto-resumes from
+    # <ckpt>/<owner>-<method>-<task>/last/ (or best/) if a VALID meta exists,
+    # continuing the SAME wandb run + last step. HF_HOME -> /tmp keeps the
+    # model download off any PVC quota.
     set +e
     groupadd -g 30204 lichen 2>/dev/null || true
-    id -u lichen >/dev/null 2>&1 || useradd -u 316680 -g 30204 -d /home/lichen -M -s /bin/bash lichen
+    id -u lichen >/dev/null 2>&1 || useradd -u 316680 -g 30204 -d /tmp/lhome -M -s /bin/bash lichen
     chown -R 316680:30204 "$(pwd)" 2>/dev/null
-    su -p lichen -c "mkdir -p /home/lichen/zo-ckpts" 2>/dev/null
-    if su -p lichen -c "test -w /home/lichen/zo-ckpts"; then CKPT=/home/lichen/zo-ckpts; else CKPT=/workspace/zo-ckpts; mkdir -p "$CKPT"; chown -R 316680:30204 "$CKPT"; fi
+    CKPT=""
+    for d in /dlab-scratch/dlabscratch1/chengheng/zo-optim /dlab-scratch/chengheng/zo-optim /dlab-scratch/zo-optim; do
+      su -p lichen -c "mkdir -p $d" 2>/dev/null && su -p lichen -c "test -w $d" && CKPT=$d && break
+    done
+    if [ -z "$CKPT" ]; then CKPT=/workspace/zo-ckpts; mkdir -p "$CKPT"; chown -R 316680:30204 "$CKPT"; echo "[ckpt-dir] WARNING: dlab-scratch not writable; using EPHEMERAL $CKPT (no preemption survival)"; fi
     echo "[ckpt-dir] using: $CKPT (run as lichen)"
     set -e
     mkdir -p /tmp/lhome && chown 316680:30204 /tmp/lhome

@@ -225,7 +225,11 @@ def save_checkpoint(model, tokenizer, optimizer, dest_dir: Path,
         # 8-bit / quantized models can have surprises here; don't kill the run.
         print(f"[ckpt] save_pretrained failed at {dest_dir}: {e}")
     try:
-        torch.save(optimizer.state_dict(), dest_dir / "optimizer.pt")
+        # Atomic: write to a temp file then rename, so a preemption mid-write
+        # never leaves a truncated optimizer.pt.
+        _opt_tmp = dest_dir / "optimizer.pt.tmp"
+        torch.save(optimizer.state_dict(), _opt_tmp)
+        os.replace(_opt_tmp, dest_dir / "optimizer.pt")
     except Exception as e:
         # Some custom optimizer states (closures, non-tensor objects) don't
         # pickle cleanly — record the failure but keep the rest of the ckpt.
@@ -235,8 +239,32 @@ def save_checkpoint(model, tokenizer, optimizer, dest_dir: Path,
             shutil.copy(source_cfg_path, dest_dir / "config.yaml")
         except Exception as e:
             print(f"[ckpt] config.yaml copy failed at {dest_dir}: {e}")
-    with open(dest_dir / "training_meta.json", "w") as fp:
+    # training_meta.json is the resume GATE: it is written LAST and ATOMICALLY
+    # (temp file -> fsync -> os.replace). A preemption that interrupts any
+    # earlier write leaves the *previous* valid meta untouched; a preemption
+    # during this write leaves either the old file or the new one, never a
+    # truncated 0-byte file. This is what prevents the JSONDecodeError
+    # crash-loop on auto-resume.
+    _meta_tmp = dest_dir / "training_meta.json.tmp"
+    with open(_meta_tmp, "w") as fp:
         json.dump(meta, fp, indent=2, default=str)
+        fp.flush()
+        os.fsync(fp.fileno())
+    os.replace(_meta_tmp, dest_dir / "training_meta.json")
+
+
+def _read_meta(meta_path: Path):
+    """Load a training_meta.json, returning None if it is missing, empty, or
+    corrupt (e.g. a write truncated by a preemption or a full disk). NEVER
+    raises — a bad checkpoint meta must not crash the relaunch; the caller
+    falls back to another checkpoint or starts fresh."""
+    try:
+        if not meta_path.exists() or meta_path.stat().st_size == 0:
+            return None
+        with open(meta_path) as f:
+            return json.load(f)
+    except (json.JSONDecodeError, OSError, ValueError):
+        return None
 
 
 def _git_sha() -> str | None:
@@ -363,11 +391,22 @@ def main():
     # run (the run id is stored in training_meta.json). This makes a preempted
     # + relaunched job seamless.
     ckpt_key = f"{owner}-{opt_name}-{args.task}"
-    _stable_last = Path(args.ckpt_dir) / ckpt_key / "last"
-    if not args.resume_from and (_stable_last / "training_meta.json").exists():
-        args.resume_from = str(_stable_last)
-        print(f"[Auto-resume] found checkpoint at {_stable_last}; resuming "
-              "(same step + same WandB run).")
+    _run_ckpt = Path(args.ckpt_dir) / ckpt_key
+    if not args.resume_from:
+        # Prefer last/ (latest step + optimizer). If its meta was truncated by
+        # a preemption / full disk, fall back to best/. Validate the meta
+        # actually PARSES before committing — a corrupt meta must NOT crash the
+        # relaunch (the old bare-json.load bug); we just start fresh instead.
+        for _cand in (_run_ckpt / "last", _run_ckpt / "best"):
+            if _read_meta(_cand / "training_meta.json") is not None:
+                args.resume_from = str(_cand)
+                print(f"[Auto-resume] found valid checkpoint at {_cand}; "
+                      "resuming (same step + same WandB run).")
+                break
+        else:
+            if (_run_ckpt / "last" / "training_meta.json").exists():
+                print(f"[Auto-resume] checkpoint meta under {_run_ckpt} is "
+                      "corrupt/empty (preemption mid-write?); starting fresh.")
 
     # ---- Resume meta (loaded early so global_step / best / total_forwards
     # ----   are seeded from disk before training starts) ------------------
@@ -375,16 +414,15 @@ def main():
     if args.resume_from:
         resume_path = Path(args.resume_from)
         meta_path   = resume_path / "training_meta.json"
-        if meta_path.exists():
-            with open(meta_path) as f:
-                resume_meta = json.load(f)
+        resume_meta = _read_meta(meta_path)
+        if resume_meta is not None:
             print(f"[Resume] meta from {meta_path}: "
                   f"step={resume_meta.get('total_steps')} "
                   f"forwards={resume_meta.get('total_forwards')} "
                   f"best={resume_meta.get('best')}")
         else:
-            print(f"[Resume] WARNING: no training_meta.json at {meta_path}; "
-                  "weights will load but counters start from 0.")
+            print(f"[Resume] WARNING: training_meta.json missing/corrupt at "
+                  f"{meta_path}; weights will load but counters start from 0.")
 
     set_seed(seed)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
