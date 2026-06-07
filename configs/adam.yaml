@@ -1,17 +1,20 @@
 # AdamW first-order baseline — the reference the ZO methods approximate.
 # Uses real backprop (forward + backward + step) via the first-order path in
-# train.py. Data, eval (logit_accuracy), and logging are IDENTICAL to the ZO
-# runs, so the accuracy is directly comparable.
+# train.py. Data, eval (logit_accuracy), and train-only-time logging are
+# IDENTICAL to the ZO runs, so the accuracy is directly comparable.
 owner: cheng
 
 model:
   name: Qwen/Qwen3.5-0.8B
-  dtype: float32   # match the ZO runs' dtype for a clean comparison
+  dtype: float32   # Qwen3.5-0.8B in fp32, as for all the ZO models
 
 training:
   seed: 42
-  batch_size: 8    # smaller than ZO's 16: backprop stores activations, and
-                   # MultiRC's long sequences + fp32 are memory-heavy
+  # Max batch size that fits one H100 (80GB) for fp32 first-order backprop.
+  # Fixed cost ~13GB (fp32 weights+grads+Adam m,v); the rest is activations,
+  # which scale with bs x seq_len. MultiRC's long sequences are the binding
+  # constraint; 32 fits, larger risks OOM on MultiRC.
+  batch_size: 32
   max_steps: 500   # first-order converges fast on these small sets
   eval_steps: 50   # frequent eval to capture the early peak
   num_train: 1000
@@ -19,9 +22,7 @@ training:
 
 optimizer:
   name: AdamW
-  kwargs:
-    lr: 1.0e-5         # standard full-fine-tune LR for a sub-1B LLM
-    weight_decay: 0.0  # constant, no WD (match the ZO no-WD setup)
+  kwargs: {}        # default lr (1e-3), default betas/eps/weight_decay
 
 hub:
   push_to_hub: false
