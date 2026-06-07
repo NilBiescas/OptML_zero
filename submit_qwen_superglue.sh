@@ -57,7 +57,7 @@ runai submit \
   --preemptible \
   --environment HF_HUB_ENABLE_HF_TRANSFER=1 \
   --environment WANDB_API_KEY="${WANDB_API_KEY}" \
-  --environment WANDB_ENTITY="${WANDB_ENTITY:-}" \
+  --environment WANDB_ENTITY="${WANDB_ENTITY:-pilligua}" \
   --environment WANDB_PROJECT="Zero-Order-Opt" \
   --environment RUN_OWNER="cheng" \
   --environment METHOD="${METHOD}" \

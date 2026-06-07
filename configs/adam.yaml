@@ -14,11 +14,11 @@ training:
   # Fixed cost ~13GB (fp32 weights+grads+Adam m,v); the rest is activations,
   # which scale with bs x seq_len. MultiRC's long sequences are the binding
   # constraint; 32 fits, larger risks OOM on MultiRC.
-  batch_size: 32
-  max_steps: 500   # first-order converges fast on these small sets
-  eval_steps: 50   # frequent eval to capture the early peak
+  batch_size: 16
+  max_steps: 2000   # first-order converges fast on these small sets
+  eval_steps: 500   # frequent eval to capture the early peak
   num_train: 1000
-  num_eval: 200    # match the FZOO/ZOMuon/ConMeZO eval set size
+  num_eval: 500    # match the FZOO/ZOMuon/ConMeZO eval set size
 
 optimizer:
   name: AdamW

@@ -16,10 +16,10 @@ model:
 training:
   seed: 42
   batch_size: 16
-  max_steps: 1500
+  max_steps: 2000
   eval_steps: 500
   num_train: 1000
-  num_eval: 200
+  num_eval: 500
 
 optimizer:
   name: ZOMuon
