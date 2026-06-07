@@ -55,8 +55,7 @@ runai submit \
   --large-shm \
   --node-pools "${NODE}" \
   --preemptible \
-  --existing-pvc claimname=dlab-scratch,path=/scratch \
-  --existing-pvc claimname=home,path=/pvc_home \
+  --existing-pvc claimname=home,path=/home/lichen \
   --environment HF_HUB_ENABLE_HF_TRANSFER=1 \
   --environment WANDB_API_KEY="${WANDB_API_KEY}" \
   --environment WANDB_ENTITY="${WANDB_ENTITY:-pilligua}" \
@@ -88,7 +87,7 @@ runai submit \
     # continuing the SAME wandb run + last step.
     set +e
     CKPT=""
-    for c in /pvc_home/scratch/chengheng /pvc_home/lichen/scratch/chengheng /pvc_home/chengheng /scratch/chengheng; do mkdir -p "$c/.wtest" 2>/dev/null && rmdir "$c/.wtest" 2>/dev/null && CKPT="$c" && break; done
+    for c in /home/lichen/scratch/chengheng /home/lichen/scratch/chengheng/zo-ckpts; do mkdir -p "$c/.wtest" 2>/dev/null && rmdir "$c/.wtest" 2>/dev/null && CKPT="$c" && break; done
     [ -z "$CKPT" ] && CKPT=/workspace/zo-ckpts && mkdir -p "$CKPT"
     echo "[ckpt-dir] using: $CKPT"
     set -e
