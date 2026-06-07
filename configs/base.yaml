@@ -1,0 +1,23 @@
+# Base-model benchmark — evaluate the UNTRAINED Qwen3.5-0.8B once per task and
+# log the zero-shot baseline to WandB as chengheng-base-<task>. Run with
+# --base-eval (the optimizer block below is ignored; no training happens).
+owner: chengheng
+
+model:
+  name: Qwen/Qwen3.5-0.8B
+  dtype: float32   # same precision as the ZO runs, for a comparable baseline
+
+training:
+  seed: 42
+  batch_size: 16
+  max_steps: 0      # no training (base-eval exits after one eval)
+  eval_steps: 500
+  num_train: 1000
+  num_eval: 1000
+
+optimizer:
+  name: MeZO        # ignored under --base-eval (run is named chengheng-base-<task>)
+  kwargs: {}
+
+hub:
+  push_to_hub: false

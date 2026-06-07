@@ -123,6 +123,10 @@ def parse_args():
                    help="Override an optimizer.kwargs entry (repeatable), e.g. "
                         "--set cone_warmup_total=4000 --set refresh_T=100. Values are "
                         "parsed as bool/int/float when possible, else kept as strings.")
+    p.add_argument("--base-eval", action="store_true",
+                   help="Benchmark the UNTRAINED base model: load it, run a single "
+                        "eval on the task, log to WandB as '<owner>-base-<task>', exit. "
+                        "No training, no optimizer. Gives the zero-shot baseline.")
     return p.parse_args()
 
 
@@ -352,6 +356,10 @@ def main():
     _extra_tags = [t for t in os.environ.get("RUN_TAGS", "").split(",") if t.strip()]
     opt_name   = cfg["optimizer"]["name"]
     opt_kwargs = cfg["optimizer"].get("kwargs", {}) or {}
+    # Base-model benchmark: name the run "<owner>-base-<task>" and skip the
+    # optimizer entirely (just eval the untrained model once).
+    if args.base_eval:
+        opt_name = "base"
     # CLI lr override (task-specific tuning, e.g. a smaller COPA lr) — applied
     # before the optimizer is built and logged into the WandB config below.
     if args.lr is not None:
@@ -381,7 +389,7 @@ def main():
     _FIRST_ORDER = {"AdamW": torch.optim.AdamW, "Adam": torch.optim.Adam,
                     "SGD": torch.optim.SGD}
     is_first_order = opt_name in _FIRST_ORDER
-    opt_cls = None if is_first_order else load_optimizer_cls(opt_name)
+    opt_cls = None if (is_first_order or args.base_eval) else load_optimizer_cls(opt_name)
 
     seed       = cfg.get("training", {}).get("seed", 42)
     batch_size = cfg.get("training", {}).get("batch_size", 16)
@@ -547,6 +555,22 @@ def main():
         if p.requires_grad:
             p.param_id   = i
             p.param_name = name
+
+    # ---- Base-model benchmark: eval the untrained model once and exit ------
+    if args.base_eval:
+        print("[base-eval] evaluating the UNTRAINED base model (no training)")
+        ev = evaluate(model, tokenizer, val_examples, spec, device,
+                      eval_batch_size=args.eval_batch_size)
+        wandb.log({**ev, "global_step": 0, "train/total_forwards": 0,
+                   "train/cumulative_train_time_sec": 0.0})
+        wandb.run.summary["final/eval_logit_accuracy"]  = ev["eval/logit_accuracy"]
+        wandb.run.summary["final/best_logit_accuracy"]  = ev["eval/logit_accuracy"]
+        wandb.run.summary["final/eval_token_accuracy"]  = ev["eval/token_accuracy"]
+        wandb.run.summary["final/train_only_time_sec"]  = 0.0
+        print(f"[base-eval] {args.task}: logit_acc={ev['eval/logit_accuracy']:.4f}  "
+              f"token_acc={ev['eval/token_accuracy']:.4f}  n={ev['eval/num_examples']}")
+        wandb.finish()
+        return
 
     # ---- Tokenize train + build loader -----------------------------------
     train_packs = [spec.format_train(ex, tokenizer) for ex in ds["train"]]
