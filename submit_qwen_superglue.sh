@@ -66,6 +66,8 @@ runai submit \
   --environment METHOD="${METHOD}" \
   --environment TASK="${TASK}" \
   --environment BRANCH="${BRANCH}" \
+  --environment LR="${LR:-}" \
+  --environment MAX_STEPS="${MAX_STEPS:-}" \
   --command -- bash -c 'set -e
     apt-get update && apt-get install -y --no-install-recommends git
     git clone https://github.com/NilBiescas/OptML_zero.git
@@ -111,7 +113,7 @@ runai submit \
     echo "[ckpt-dir] using: $CKPT (run as lichen)"
     set -e
     mkdir -p /tmp/lhome && chown 316680:30204 /tmp/lhome
-    su -p lichen -c "export HOME=/tmp/lhome PATH=/opt/conda/bin:/usr/bin:/bin HF_HOME=/tmp/hf HF_HUB_ENABLE_HF_TRANSFER=1 && cd $(pwd) && /opt/conda/bin/python train.py --config configs/${METHOD}.yaml --task ${TASK} --owner chengheng --ckpt-dir $CKPT"
+    su -p lichen -c "export HOME=/tmp/lhome PATH=/opt/conda/bin:/usr/bin:/bin HF_HOME=/tmp/hf HF_HUB_ENABLE_HF_TRANSFER=1 && cd $(pwd) && /opt/conda/bin/python train.py --config configs/${METHOD}.yaml --task ${TASK} --owner chengheng --ckpt-dir $CKPT ${LR:+--lr $LR} ${MAX_STEPS:+--max-steps $MAX_STEPS}"
   '
 
 cat <<EOF

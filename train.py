@@ -113,6 +113,12 @@ def parse_args():
     p.add_argument("--resume-from", default=None,
                    help="Path to a prior run's `last/` dir to resume from "
                         "(reuses model weights + optimizer state + step/forward/best counters)")
+    p.add_argument("--lr", type=float, default=None,
+                   help="Override optimizer.kwargs.lr from the YAML (e.g. a smaller "
+                        "task-specific lr for COPA). None = use the YAML value.")
+    p.add_argument("--max-steps", type=int, default=None,
+                   help="Override training.max_steps from the YAML (e.g. fewer steps "
+                        "for the tiny 400-example COPA set). None = use the YAML value.")
     return p.parse_args()
 
 
@@ -342,6 +348,11 @@ def main():
     _extra_tags = [t for t in os.environ.get("RUN_TAGS", "").split(",") if t.strip()]
     opt_name   = cfg["optimizer"]["name"]
     opt_kwargs = cfg["optimizer"].get("kwargs", {}) or {}
+    # CLI lr override (task-specific tuning, e.g. a smaller COPA lr) — applied
+    # before the optimizer is built and logged into the WandB config below.
+    if args.lr is not None:
+        print(f"[lr-override] {opt_name} lr {opt_kwargs.get('lr')} -> {args.lr}")
+        opt_kwargs["lr"] = args.lr
     # First-order baselines (AdamW/Adam/SGD) for reference: they use real
     # backprop, not the ZO closure. Everything else (data, eval, logging) is
     # identical, so the accuracy is directly comparable to the ZO methods.
@@ -353,6 +364,9 @@ def main():
     seed       = cfg.get("training", {}).get("seed", 42)
     batch_size = cfg.get("training", {}).get("batch_size", 16)
     max_steps  = cfg.get("training", {}).get("max_steps", 20000)
+    if args.max_steps is not None:
+        print(f"[max-steps-override] {max_steps} -> {args.max_steps}")
+        max_steps = args.max_steps
     eval_steps = cfg.get("training", {}).get("eval_steps", 500)
     num_train  = cfg.get("training", {}).get("num_train", 1000)
     num_eval   = cfg.get("training", {}).get("num_eval", 1000)
