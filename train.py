@@ -312,7 +312,13 @@ def main():
 
     opt_name   = cfg["optimizer"]["name"]
     opt_kwargs = cfg["optimizer"].get("kwargs", {}) or {}
-    opt_cls    = load_optimizer_cls(opt_name)
+    # First-order baselines (AdamW/Adam/SGD) for reference: they use real
+    # backprop, not the ZO closure. Everything else (data, eval, logging) is
+    # identical, so the accuracy is directly comparable to the ZO methods.
+    _FIRST_ORDER = {"AdamW": torch.optim.AdamW, "Adam": torch.optim.Adam,
+                    "SGD": torch.optim.SGD}
+    is_first_order = opt_name in _FIRST_ORDER
+    opt_cls = None if is_first_order else load_optimizer_cls(opt_name)
 
     seed       = cfg.get("training", {}).get("seed", 42)
     batch_size = cfg.get("training", {}).get("batch_size", 16)
@@ -457,8 +463,11 @@ def main():
     )
 
     # ---- Optimizer --------------------------------------------------------
-    optimizer = opt_cls(model.parameters(), **opt_kwargs)
-    print(f"[Opt] {opt_name}({opt_kwargs})")
+    if is_first_order:
+        optimizer = _FIRST_ORDER[opt_name](model.parameters(), **opt_kwargs)
+    else:
+        optimizer = opt_cls(model.parameters(), **opt_kwargs)
+    print(f"[Opt] {opt_name}({opt_kwargs})  first_order={is_first_order}")
 
     # ---- Resume optimizer state (best-effort) ----------------------------
     if args.resume_from:
@@ -563,7 +572,21 @@ def main():
             return loss_t.detach(), last_hidden.detach(), last_hidden.grad.detach()
 
         t0 = time.perf_counter()
-        optimizer.step(closure)
+        if is_first_order:
+            # Standard first-order step: forward + backward + update. Train
+            # mode (dropout on) is the usual fine-tuning regime; eval still
+            # runs in eval mode below for a fair comparison with the ZO runs.
+            model.train()
+            optimizer.zero_grad(set_to_none=True)
+            out = model(input_ids=batch["input_ids"],
+                        attention_mask=batch["attention_mask"],
+                        labels=batch["labels"])
+            out.loss.backward()
+            optimizer.step()
+            step_loss["v"]      = out.loss.detach()
+            step_forwards["n"] += 1  # 1 forward (+1 backward, not counted here)
+        else:
+            optimizer.step(closure)
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         dt = time.perf_counter() - t0
