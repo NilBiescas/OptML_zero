@@ -4,9 +4,10 @@ owner: maria
 
 model:
   name: Qwen/Qwen3.5-0.8B
-  dtype: bfloat16                  # bf16 not fp16: HiZOO's 1/eps² Hessian term
-                                   # overflows fp16 (max 65504) → corrupts the
-                                   # preconditioner → collapse. bf16 = fp32 range.
+  dtype: float32                   # fp32: max numerical stability for HiZOO's
+                                   # 1/eps² Hessian term (fp16 overflows, bf16
+                                   # loses precision). ZO has no backprop so
+                                   # memory is not a constraint (~7GB total).
 
 training:
   seed: 42
