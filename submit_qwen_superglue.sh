@@ -88,12 +88,7 @@ runai submit \
     # continuing the SAME wandb run + last step.
     set +e
     CKPT=""
-    for c in /pvc_home/scratch/chengheng/zo-ckpts \
-             /pvc_home/lichen/scratch/chengheng/zo-ckpts \
-             /pvc_home/chengheng/zo-ckpts \
-             /scratch/chengheng/zo-ckpts; do
-      if mkdir -p "$c/.wtest" 2>/dev/null && rmdir "$c/.wtest" 2>/dev/null; then CKPT="$c"; break; fi
-    done
+    for c in /pvc_home/scratch/chengheng /pvc_home/lichen/scratch/chengheng /pvc_home/chengheng /scratch/chengheng; do mkdir -p "$c/.wtest" 2>/dev/null && rmdir "$c/.wtest" 2>/dev/null && CKPT="$c" && break; done
     [ -z "$CKPT" ] && CKPT=/workspace/zo-ckpts && mkdir -p "$CKPT"
     echo "[ckpt-dir] using: $CKPT"
     set -e
