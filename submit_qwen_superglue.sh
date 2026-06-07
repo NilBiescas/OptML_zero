@@ -85,14 +85,21 @@ runai submit \
     # local storage so the run NEVER dies at the checkpoint step. The harness
     # auto-resumes from <ckpt>/<owner>-<method>-<task>/last/ if present,
     # continuing the SAME wandb run + last step.
+    # Run training as the submitting user (lichen, uid 316680) so checkpoints
+    # written to the NFS home PVC are NOT root-squashed. NFS root_squash only
+    # maps uid 0 -> nobody; uid 316680 maps to lichen, who owns /home/lichen,
+    # so it can write there. Checkpoints land durably in /home/lichen/zo-ckpts
+    # and survive preemption (auto-resume). HF_HOME -> /tmp keeps the model
+    # download off the home quota.
     set +e
-    CKPT=""
-    for c in /home/lichen/scratch/chengheng /home/lichen/scratch/chengheng/zo-ckpts; do mkdir -p "$c/.wtest" 2>/dev/null && rmdir "$c/.wtest" 2>/dev/null && CKPT="$c" && break; done
-    [ -z "$CKPT" ] && CKPT=/workspace/zo-ckpts && mkdir -p "$CKPT"
-    echo "[ckpt-dir] using: $CKPT"
+    groupadd -g 30204 lichen 2>/dev/null || true
+    id -u lichen >/dev/null 2>&1 || useradd -u 316680 -g 30204 -d /home/lichen -M -s /bin/bash lichen
+    chown -R 316680:30204 "$(pwd)" 2>/dev/null
+    su -p lichen -c "mkdir -p /home/lichen/zo-ckpts" 2>/dev/null
+    if su -p lichen -c "test -w /home/lichen/zo-ckpts"; then CKPT=/home/lichen/zo-ckpts; else CKPT=/workspace/zo-ckpts; mkdir -p "$CKPT"; chown -R 316680:30204 "$CKPT"; fi
+    echo "[ckpt-dir] using: $CKPT (run as lichen)"
     set -e
-    python train.py --config "configs/${METHOD}.yaml" --task "${TASK}" --owner chengheng \
-      --ckpt-dir "$CKPT"
+    su -p lichen -c "cd $(pwd) && HF_HOME=/tmp/hf HF_HUB_ENABLE_HF_TRANSFER=1 python train.py --config configs/${METHOD}.yaml --task ${TASK} --owner chengheng --ckpt-dir $CKPT"
   '
 
 cat <<EOF
