@@ -385,6 +385,7 @@ def main():
         run_name = resumed_run_name
         wandb.init(
             project="Zero-Order-Opt",
+            entity="pilligua",   # team workspace — overrides any WANDB_ENTITY env
             id=resumed_run_id,
             resume="allow",
             name=run_name,
@@ -403,6 +404,7 @@ def main():
         run_name = f"{owner}-{opt_name}-{args.task}-{stamp}"
         wandb.init(
             project="Zero-Order-Opt",
+            entity="pilligua",   # team workspace — overrides any WANDB_ENTITY env
             name=run_name,
             group=args.task,                          # group all multirc / all copa together
             tags=[owner, opt_name, args.task],        # filter in the dashboard
