@@ -106,6 +106,10 @@ def parse_args():
                    help="SuperGLUE task to train / evaluate on")
     p.add_argument("--owner", default=None,
                    help="Run owner: maria | nil | cheng (falls back to $RUN_OWNER or yaml owner)")
+    p.add_argument("--model", default=None,
+                   help="Override model.name from the YAML (e.g. Qwen/Qwen2.5-0.5B). "
+                        "A short model tag is threaded into the run name + checkpoint key "
+                        "so multiple models never collide.")
     p.add_argument("--eval-batch-size", type=int, default=8,
                    help="Batch size for the eval forward (eval is bottleneck if =1)")
     p.add_argument("--ckpt-dir", default="checkpoints",
@@ -433,7 +437,11 @@ def main():
     print(f"[lr-sched] {lr_sched}  warmup_ratio={warmup_ratio}  warmup_steps={warmup_steps}")
     num_train  = cfg.get("training", {}).get("num_train", 1000)
     num_eval   = cfg.get("training", {}).get("num_eval", 1000)
-    model_name = cfg.get("model", {}).get("name", "Qwen/Qwen3.5-0.8B")
+    model_name = args.model or cfg.get("model", {}).get("name", "Qwen/Qwen3.5-0.8B")
+    # Short tag derived from the model id (org stripped, lowercased), e.g.
+    # "Qwen/Qwen3.5-0.8B" -> "qwen3.5-0.8b". Threaded into the WandB run name and
+    # the stable checkpoint key so two models never collide on either.
+    model_tag = model_name.split("/")[-1].lower()
     # Default dtype is bfloat16: more stable than fp16 for long-horizon ZO
     # runs (RCP1 hit fp16 underflow during Sparse-MeZO replication on WiC).
     dtype_str  = cfg.get("model", {}).get("dtype", "bfloat16")
@@ -467,7 +475,7 @@ def main():
     # the job picks up from the last saved step AND continues the SAME WandB
     # run (the run id is stored in training_meta.json). This makes a preempted
     # + relaunched job seamless.
-    ckpt_key = f"{owner}-{opt_name}-{args.task}"
+    ckpt_key = f"{owner}-{opt_name}-{args.task}-{model_tag}"
     _run_ckpt = Path(args.ckpt_dir) / ckpt_key
     if not args.resume_from:
         # Prefer last/ (latest step + optimizer). If its meta was truncated by
@@ -515,8 +523,9 @@ def main():
         project="Zero-Order-Opt",
         entity="pilligua",   # team workspace — overrides any WANDB_ENTITY env
         group=args.task,     # group all multirc / all copa together
-        tags=[owner, opt_name, args.task] + _extra_tags,
+        tags=[owner, opt_name, args.task, model_tag] + _extra_tags,
         config={**cfg, "task": args.task, "owner": owner,
+                "model": model_name, "model_tag": model_tag,
                 "_resolved_seed": seed,
                 "_resolved_dtype": dtype_str,
                 "_resumed_from":   args.resume_from,
@@ -544,7 +553,7 @@ def main():
             run = None
     if run is None:
         stamp    = datetime.now(timezone.utc).strftime("%m_%d_%H_%M_%S")
-        run_name = f"{owner}-{opt_name}-{args.task}-{stamp}"
+        run_name = f"{owner}-{opt_name}-{args.task}-{model_tag}-{stamp}"
         run = wandb.init(name=run_name, **_wandb_base)
 
     # ---- Load task data ---------------------------------------------------
@@ -845,6 +854,8 @@ def main():
                     "task":           args.task,
                     "opt_name":       opt_name,
                     "owner":          owner,
+                    "model_name":     model_name,
+                    "model_tag":      model_tag,
                     "git_sha":        _git_sha(),
                 }
                 save_checkpoint(model, tokenizer, optimizer, best_dir,
@@ -872,6 +883,8 @@ def main():
                 "task":           args.task,
                 "opt_name":       opt_name,
                 "owner":          owner,
+                "model_name":     model_name,
+                "model_tag":      model_tag,
             }
             save_checkpoint(model, tokenizer, optimizer, last_dir,
                             last_meta, source_cfg_path=args.config)
