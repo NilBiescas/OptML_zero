@@ -54,6 +54,8 @@ runai submit \
   --gpu "${GPUS}" \
   --large-shm \
   --node-pools "${NODE}" \
+  --preemptible \
+  --existing-pvc claimname=dlab-scratch,path=/scratch \
   --environment HF_HUB_ENABLE_HF_TRANSFER=1 \
   --environment WANDB_API_KEY="${WANDB_API_KEY}" \
   --environment WANDB_ENTITY="${WANDB_ENTITY:-pilligua}" \
@@ -75,7 +77,13 @@ runai submit \
     # float8_e8m0fnu / ModuleNotFoundError: Qwen3_5ForCausalLM.
     pip install --quiet "torch==2.7.1" --index-url https://download.pytorch.org/whl/cu126
     pip install --quiet -r requirements.txt hf_transfer
-    python train.py --config "configs/${METHOD}.yaml" --task "${TASK}" --owner chengheng
+    # Checkpoints (best + rolling last) live on the durable dlab-scratch PVC at
+    # /scratch/chengheng/zo-ckpts/<owner>-<method>-<task>/. The harness
+    # auto-resumes from last/ if present, continuing the SAME wandb run and the
+    # last step — so a preempted + relaunched job picks up where it left off.
+    mkdir -p /scratch/chengheng/zo-ckpts
+    python train.py --config "configs/${METHOD}.yaml" --task "${TASK}" --owner chengheng \
+      --ckpt-dir /scratch/chengheng/zo-ckpts
   '
 
 cat <<EOF

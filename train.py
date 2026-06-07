@@ -355,6 +355,20 @@ def main():
         hub_repo_id = f"{handle}/zo-comparison-qwen"
         print(f"[hub] no repo_id in YAML; defaulting to {hub_repo_id}")
 
+    # ---- Auto-resume on preemption ---------------------------------------
+    # Checkpoints live at a STABLE, timestamp-free path keyed by
+    # (owner, method, task) on the durable PVC. If a `last/` checkpoint already
+    # exists there and the caller didn't pass --resume-from, resume from it:
+    # the job picks up from the last saved step AND continues the SAME WandB
+    # run (the run id is stored in training_meta.json). This makes a preempted
+    # + relaunched job seamless.
+    ckpt_key = f"{owner}-{opt_name}-{args.task}"
+    _stable_last = Path(args.ckpt_dir) / ckpt_key / "last"
+    if not args.resume_from and (_stable_last / "training_meta.json").exists():
+        args.resume_from = str(_stable_last)
+        print(f"[Auto-resume] found checkpoint at {_stable_last}; resuming "
+              "(same step + same WandB run).")
+
     # ---- Resume meta (loaded early so global_step / best / total_forwards
     # ----   are seeded from disk before training starts) ------------------
     resume_meta = None
@@ -497,7 +511,9 @@ def main():
     wandb.run.summary["passes_per_datapoint"] = total_epochs
 
     # ---- Checkpoint dirs --------------------------------------------------
-    run_ckpt_dir = Path(args.ckpt_dir) / run_name
+    # Stable key (no timestamp) so a relaunched pod writes to / resumes from
+    # the same directory on the PVC.
+    run_ckpt_dir = Path(args.ckpt_dir) / ckpt_key
     best_dir     = run_ckpt_dir / "best"
     last_dir     = run_ckpt_dir / "last"
     print(f"[Ckpt] best -> {best_dir}   last -> {last_dir}")
@@ -682,6 +698,23 @@ def main():
                 }, step=global_step)
                 print(f"  [best] new best logit_acc={best['logit_accuracy']:.4f} "
                       f"(saved -> {best_dir})")
+
+            # Rolling "last" checkpoint every eval (on the durable PVC) so a
+            # preempted + relaunched pod resumes from here — at most eval_steps
+            # of progress lost. This save is OUTSIDE the train-step timer, so it
+            # does not pollute train/cumulative_train_time_sec.
+            last_meta = {
+                "total_steps":    global_step,
+                "total_forwards": total_forwards,
+                "best":           dict(best),
+                "run_name":       run_name,
+                "wandb_run_id":   wandb.run.id,
+                "task":           args.task,
+                "opt_name":       opt_name,
+                "owner":          owner,
+            }
+            save_checkpoint(model, tokenizer, optimizer, last_dir,
+                            last_meta, source_cfg_path=args.config)
 
             model.eval()   # keep eval mode for the next ZO step
 
