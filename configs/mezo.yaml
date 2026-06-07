@@ -20,7 +20,7 @@ training:
 optimizer:
   name: MeZO
   kwargs:
-    lr: 1.0e-7
+    lr: 5.0e-8
     eps: 1.0e-3
     seed: 42
 
