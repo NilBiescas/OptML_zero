@@ -15,11 +15,11 @@ training:
 optimizer:
   name: SubZero
   kwargs:
-    lr: 1e-11            
-    eps: 1e-4
-    weight_decay: 0.0
-    gauss_rank: 24       
-    update_interval: 10 
+    lr: 1e-6            
+    eps: 1e-3
+    weight_decay: 0.01
+    gauss_rank: 64       
+    update_interval: 50 
     perturbation_mode: two_side
     mode: full
 
