@@ -4,7 +4,9 @@ owner: maria
 
 model:
   name: Qwen/Qwen3.5-0.8B
-  dtype: float16
+  dtype: bfloat16                  # bf16 not fp16: HiZOO's 1/eps² Hessian term
+                                   # overflows fp16 (max 65504) → corrupts the
+                                   # preconditioner → collapse. bf16 = fp32 range.
 
 training:
   seed: 42
@@ -17,11 +19,11 @@ training:
 optimizer:
   name: HiZOO
   kwargs:
-    lr: 5e-8                       # best found: peaks ~61% at step 1500
+    lr: 5e-8                       # most stable LR for the 0.8B model
     eps: 1e-3                      # paper default
     hessian_smooth_type: constant1e-8
     weight_decay: 0.0
-    total_steps: 5000              # fast cosine: LR reaches 5e-9 by step 5000, then constant
+    total_steps: 20000             # gentle cosine over the full run
     lr_scheduler: cosine
     lr_min_ratio: 0.1              # final LR = 5e-9
 
