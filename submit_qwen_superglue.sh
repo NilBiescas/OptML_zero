@@ -54,12 +54,12 @@ runai submit \
   --gpu "${GPUS}" \
   --large-shm \
   --node-pools "${NODE}" \
-  --preemptible \
   --environment HF_HUB_ENABLE_HF_TRANSFER=1 \
   --environment WANDB_API_KEY="${WANDB_API_KEY}" \
   --environment WANDB_ENTITY="${WANDB_ENTITY:-pilligua}" \
   --environment WANDB_PROJECT="Zero-Order-Opt" \
   --environment RUN_OWNER="chengheng" \
+  --environment RUN_TAGS="${RUN_TAGS:-}" \
   --environment METHOD="${METHOD}" \
   --environment TASK="${TASK}" \
   --environment BRANCH="${BRANCH}" \

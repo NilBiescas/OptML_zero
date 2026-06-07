@@ -311,6 +311,7 @@ def main():
             f"maria|nil|cheng|chengheng (got {owner!r})"
         )
 
+    _extra_tags = [t for t in os.environ.get("RUN_TAGS", "").split(",") if t.strip()]
     opt_name   = cfg["optimizer"]["name"]
     opt_kwargs = cfg["optimizer"].get("kwargs", {}) or {}
     # First-order baselines (AdamW/Adam/SGD) for reference: they use real
@@ -390,7 +391,7 @@ def main():
             resume="allow",
             name=run_name,
             group=args.task,
-            tags=[owner, opt_name, args.task],
+            tags=[owner, opt_name, args.task] + _extra_tags,
             config={**cfg, "task": args.task, "owner": owner,
                     "_resolved_seed": seed,
                     "_resolved_dtype": dtype_str,
@@ -407,7 +408,7 @@ def main():
             entity="pilligua",   # team workspace — overrides any WANDB_ENTITY env
             name=run_name,
             group=args.task,                          # group all multirc / all copa together
-            tags=[owner, opt_name, args.task],        # filter in the dashboard
+            tags=[owner, opt_name, args.task] + _extra_tags,        # filter in the dashboard
             config={**cfg, "task": args.task, "owner": owner,
                     "_resolved_seed": seed,
                     "_resolved_dtype": dtype_str,
