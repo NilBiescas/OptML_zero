@@ -734,6 +734,26 @@ def main():
                 print(f"  [best] new best logit_acc={best['logit_accuracy']:.4f} "
                       f"(saved -> {best_dir})")
 
+            # ---- Periodic `last` checkpoint (every eval) for preemption resume ----
+            # Saved on EVERY eval, not just at the end, so a preempted job can
+            # restart from the most recent point (loses at most eval_steps steps)
+            # instead of from scratch. resume picks this up via --resume-from.
+            periodic_meta = {
+                "total_steps":    global_step,
+                "total_forwards": total_forwards,
+                "wall_time_sec":  time.perf_counter() - run_start_time,
+                "nan_aborted":    False,
+                "best":           dict(best),
+                "run_name":       run_name,
+                "wandb_run_id":   wandb.run.id,
+                "task":           args.task,
+                "opt_name":       opt_name,
+                "owner":          owner,
+                "git_sha":        _git_sha(),
+            }
+            save_checkpoint(model, tokenizer, optimizer, last_dir,
+                            periodic_meta, source_cfg_path=args.config)
+
             # Restore mode for the next training step
             if is_first_order:
                 model.train()

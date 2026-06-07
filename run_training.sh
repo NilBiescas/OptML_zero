@@ -99,6 +99,11 @@ echo "========================================"
 
 mkdir -p /mnt/cvlab/scratch/cvlab/home/pilligua/OML/logs
 
+# Stable per-job checkpoint dir (survives preemption — RunAI reuses $JOB).
+# On restart the runner globs for an existing `last/` checkpoint under this
+# dir and auto-resumes; train.py reuses the same WandB run + step counters.
+CKPT_DIR="/scratch/cvlab/home/pilligua/OML/checkpoints/${JOB}"
+
 # Write the runner script to disk — avoids bash -c quoting issues
 RUNNER=/mnt/cvlab/scratch/cvlab/home/pilligua/OML/logs/${JOB}.sh
 cat > "$RUNNER" << RUNNER_EOF
@@ -110,14 +115,27 @@ export HUGGINGFACE_HUB_TOKEN=\$HF_TOKEN
 export PYTHONNOUSERSITE=1
 export PYTHONPATH=$PYTHONPATH_VAL
 mkdir -p /scratch/cvlab/home/pilligua/OML/logs
+
+# Auto-resume: if a prior 'last' checkpoint exists for this job, resume from it.
+CKPT_DIR=$CKPT_DIR
+RESUME_ARG=""
+LAST_CKPT=\$(ls -d \$CKPT_DIR/*/last 2>/dev/null | head -1)
+if [ -n "\$LAST_CKPT" ] && [ -f "\$LAST_CKPT/training_meta.json" ]; then
+  echo "[resume] found checkpoint at \$LAST_CKPT — resuming"
+  RESUME_ARG="--resume-from \$LAST_CKPT"
+else
+  echo "[resume] no checkpoint found — starting fresh"
+fi
+
 cd /scratch/cvlab/home/pilligua/OML/OptML_zero
 python3 train.py \
     --config $CONFIG \
     --task $TASK \
     --owner $OWNER \
     --eval-batch-size 8 \
-    --ckpt-dir /scratch/cvlab/home/pilligua/OML/checkpoints \
-    2>&1 | tee $LOG
+    --ckpt-dir \$CKPT_DIR \
+    \$RESUME_ARG \
+    2>&1 | tee -a $LOG
 echo "[DONE] \$?"
 RUNNER_EOF
 chmod 755 "$RUNNER"
