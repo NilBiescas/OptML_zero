@@ -28,7 +28,10 @@ MODEL="${MODEL:-Qwen/Qwen3.5-0.8B}"
 SUFFIX="${SUFFIX:-}"
 GPUS=1
 NODE="${NODE:-h100}"
-TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
+# Short timestamp (HHMMSS only): runai blocks job names >55 chars, and the
+# model tag + -short suffix already use most of the budget. The wandb run id is
+# deterministic (independent of the job name), so a shorter stamp is safe.
+TIMESTAMP="$(date +%H%M%S)"
 # runai job names must be alphanumeric + '-' only: sanitize underscores
 # (e.g. config stem "zo_muon" -> name token "zo-muon"). CONFIG_FILE still uses
 # the original METHOD so it resolves configs/zo_muon.yaml.
