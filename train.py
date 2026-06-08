@@ -554,7 +554,22 @@ def main():
     if run is None:
         stamp    = datetime.now(timezone.utc).strftime("%m_%d_%H_%M_%S")
         run_name = f"{owner}-{opt_name}-{args.task}-{model_tag}-{stamp}"
-        run = wandb.init(name=run_name, **_wandb_base)
+        # Force a BRAND-NEW id each attempt: a failed resume above can leave a
+        # stale/locked id cached, and wandb then crash-loops with
+        # "run ID ... is in use". Generating a fresh id (and retrying) avoids it.
+        for _attempt in range(4):
+            try:
+                run = wandb.init(id=wandb.util.generate_id(), name=run_name, **_wandb_base)
+                break
+            except Exception as e:
+                print(f"[wandb] fresh init attempt {_attempt} failed "
+                      f"({type(e).__name__}: {e}); retrying with a new id")
+                try:
+                    wandb.finish(exit_code=1)
+                except Exception:
+                    pass
+        if run is None:
+            raise RuntimeError("wandb.init failed after 4 fresh attempts")
 
     # ---- Load task data ---------------------------------------------------
     spec, ds = load_task(args.task, num_train=num_train, seed=seed)
