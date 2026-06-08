@@ -537,7 +537,33 @@ def main():
     # NEW run (e.g. a hyperparameter change), delete the wandb run first;
     # relaunching then recreates it under the same id, fresh.
     import hashlib
-    stable_id = "zo" + hashlib.md5(ckpt_key.encode()).hexdigest()[:14]
+    # Persist the wandb run id in the durable ckpt dir. A preempted+relaunched
+    # job (valid checkpoint present) RESUMES the SAME run by reading this file;
+    # a genuinely FRESH start instead mints a SALTED id. This dodges the
+    # "phantom lock" failure mode: when an init times out server-side it leaves
+    # a half-created run that is un-findable via the API yet permanently blocks
+    # the plain deterministic id with "run ID is in use". Salting per fresh
+    # start means a new run never inherits another run's poisoned id.
+    _id_file  = _run_ckpt / "wandb_id"
+    if args.resume_from:
+        # Resuming real progress: reuse the same run id. Prefer the persisted
+        # file; fall back to the legacy plain-deterministic id for checkpoints
+        # written before this fix (so they keep ONE continuous curve).
+        if _id_file.exists():
+            stable_id = _id_file.read_text().strip()
+        else:
+            stable_id = "zo" + hashlib.md5(ckpt_key.encode()).hexdigest()[:14]
+        print(f"[wandb] resuming run id={stable_id}")
+    else:
+        # Fresh start: salted id so we never inherit another run's poisoned id.
+        _salt = hashlib.md5(f"{ckpt_key}-{time.time()}".encode()).hexdigest()[:6]
+        stable_id = "zo" + hashlib.md5(f"{ckpt_key}-{_salt}".encode()).hexdigest()[:14]
+        print(f"[wandb] fresh run id={stable_id}")
+    try:
+        _id_file.parent.mkdir(parents=True, exist_ok=True)
+        _id_file.write_text(stable_id)
+    except Exception as _e:
+        print(f"[wandb] WARN: could not persist run id ({_e})")
     run_name  = ckpt_key   # includes the model tag (+ run-suffix if any)
     _wandb_base = dict(
         project="Zero-Order-Opt",
@@ -583,6 +609,11 @@ def main():
             wandb.finish(exit_code=1)
         except Exception:
             pass
+        # The submit script exports WANDB_MODE=online, and that env var OVERRIDES
+        # wandb.Settings(mode="offline") -> the "offline" init would still hit the
+        # server and re-raise. Force the env to offline so the fallback truly runs
+        # locally (syncable later) and training proceeds.
+        os.environ["WANDB_MODE"] = "offline"
         _offline = dict(_wandb_base)
         _offline["settings"] = wandb.Settings(init_timeout=180, mode="offline")
         run = wandb.init(id=stable_id, resume="allow", name=run_name, **_offline)
