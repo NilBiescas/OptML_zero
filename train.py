@@ -123,6 +123,9 @@ def parse_args():
     p.add_argument("--max-steps", type=int, default=None,
                    help="Override training.max_steps from the YAML (e.g. fewer steps "
                         "for the tiny 400-example COPA set). None = use the YAML value.")
+    p.add_argument("--eval-steps", type=int, default=None,
+                   help="Override training.eval_steps (e.g. 50 for a short 500-step "
+                        "COPA run, to capture the early peak finely). None = YAML value.")
     p.add_argument("--set", action="append", default=None, metavar="KEY=VALUE",
                    help="Override an optimizer.kwargs entry (repeatable), e.g. "
                         "--set cone_warmup_total=4000 --set refresh_T=100. Values are "
@@ -428,6 +431,9 @@ def main():
         print(f"[max-steps-override] {max_steps} -> {args.max_steps}")
         max_steps = args.max_steps
     eval_steps = cfg.get("training", {}).get("eval_steps", 500)
+    if args.eval_steps is not None:
+        print(f"[eval-steps-override] {eval_steps} -> {args.eval_steps}")
+        eval_steps = args.eval_steps
     # ---- LR scheduler (default constant = ZO-paper convention) ------------
     lr_sched = (args.lr_scheduler
                 or cfg.get("training", {}).get("lr_scheduler") or "constant")

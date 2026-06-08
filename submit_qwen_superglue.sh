@@ -75,6 +75,7 @@ runai submit \
   --environment BRANCH="${BRANCH}" \
   --environment LR="${LR:-}" \
   --environment MAX_STEPS="${MAX_STEPS:-}" \
+  --environment EVAL_STEPS="${EVAL_STEPS:-}" \
   --environment EXTRA_ARGS="${EXTRA_ARGS:-}" \
   --command -- bash -c 'set -e
     apt-get update && apt-get install -y --no-install-recommends git
@@ -121,7 +122,7 @@ runai submit \
     echo "[ckpt-dir] using: $CKPT (run as lichen)"
     set -e
     mkdir -p /tmp/lhome && chown 316680:30204 /tmp/lhome
-    su -p lichen -c "export HOME=/tmp/lhome PATH=/opt/conda/bin:/usr/bin:/bin HF_HOME=/tmp/hf HF_HUB_ENABLE_HF_TRANSFER=1 && cd $(pwd) && /opt/conda/bin/python train.py --config configs/${METHOD}.yaml --task ${TASK} --owner chengheng --ckpt-dir $CKPT ${MODEL:+--model $MODEL} ${LR:+--lr $LR} ${MAX_STEPS:+--max-steps $MAX_STEPS} ${EXTRA_ARGS:-}"
+    su -p lichen -c "export HOME=/tmp/lhome PATH=/opt/conda/bin:/usr/bin:/bin HF_HOME=/tmp/hf HF_HUB_ENABLE_HF_TRANSFER=1 && cd $(pwd) && /opt/conda/bin/python train.py --config configs/${METHOD}.yaml --task ${TASK} --owner chengheng --ckpt-dir $CKPT ${MODEL:+--model $MODEL} ${LR:+--lr $LR} ${MAX_STEPS:+--max-steps $MAX_STEPS} ${EVAL_STEPS:+--eval-steps $EVAL_STEPS} ${EXTRA_ARGS:-}"
   '
 
 cat <<EOF
