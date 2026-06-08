@@ -126,6 +126,10 @@ def parse_args():
     p.add_argument("--eval-steps", type=int, default=None,
                    help="Override training.eval_steps (e.g. 50 for a short 500-step "
                         "COPA run, to capture the early peak finely). None = YAML value.")
+    p.add_argument("--run-suffix", default=None,
+                   help="Suffix appended to the run key (e.g. 'short') so this run is a "
+                        "DISTINCT wandb run + checkpoint dir, coexisting with the default "
+                        "long run instead of resuming it. Also added as a tag.")
     p.add_argument("--set", action="append", default=None, metavar="KEY=VALUE",
                    help="Override an optimizer.kwargs entry (repeatable), e.g. "
                         "--set cone_warmup_total=4000 --set refresh_T=100. Values are "
@@ -482,6 +486,8 @@ def main():
     # run (the run id is stored in training_meta.json). This makes a preempted
     # + relaunched job seamless.
     ckpt_key = f"{owner}-{opt_name}-{args.task}-{model_tag}"
+    if args.run_suffix:
+        ckpt_key = f"{ckpt_key}-{args.run_suffix}"   # distinct id/name/ckpt + tag
     _run_ckpt = Path(args.ckpt_dir) / ckpt_key
     if not args.resume_from:
         # Prefer last/ (latest step + optimizer). If its meta was truncated by
@@ -532,12 +538,13 @@ def main():
     # relaunching then recreates it under the same id, fresh.
     import hashlib
     stable_id = "zo" + hashlib.md5(ckpt_key.encode()).hexdigest()[:14]
-    run_name  = f"{owner}-{opt_name}-{args.task}-{model_tag}"
+    run_name  = ckpt_key   # includes the model tag (+ run-suffix if any)
     _wandb_base = dict(
         project="Zero-Order-Opt",
         entity="pilligua",   # team workspace — overrides any WANDB_ENTITY env
         group=args.task,     # group all multirc / all copa together
-        tags=[owner, opt_name, args.task, model_tag] + _extra_tags,
+        tags=[owner, opt_name, args.task, model_tag]
+             + ([args.run_suffix] if args.run_suffix else []) + _extra_tags,
         config={**cfg, "task": args.task, "owner": owner,
                 "model": model_name, "model_tag": model_tag,
                 "_resolved_seed": seed,

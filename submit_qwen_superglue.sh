@@ -24,6 +24,8 @@ TASK="${TASK:-copa}"
 # Model id (HF). Default keeps the original single-model behaviour; pass
 # MODEL=Qwen/Qwen2.5-0.5B for the second model. Forwarded to train.py as --model.
 MODEL="${MODEL:-Qwen/Qwen3.5-0.8B}"
+# Optional run-suffix (e.g. "short") -> distinct wandb run + ckpt + tag.
+SUFFIX="${SUFFIX:-}"
 GPUS=1
 NODE="${NODE:-h100}"
 TIMESTAMP="$(date +%Y%m%d-%H%M%S)"
@@ -34,7 +36,7 @@ METHOD_SAFE="${METHOD//_/-}"
 # Model token for the job name: strip org, lowercase, dots -> dashes
 # (e.g. "Qwen/Qwen2.5-0.5B" -> "qwen2-5-0-5b") so two models get distinct jobs.
 MODEL_SAFE="$(echo "${MODEL##*/}" | tr '[:upper:]' '[:lower:]' | tr '.' '-')"
-JOB_NAME="chengheng-${METHOD_SAFE}-${TASK}-${MODEL_SAFE}-${TIMESTAMP}"
+JOB_NAME="chengheng-${METHOD_SAFE}-${TASK}-${MODEL_SAFE}${SUFFIX:+-${SUFFIX}}-${TIMESTAMP}"
 PROJECT="dlab-${GASPAR}"
 IMAGE="pytorch/pytorch:2.6.0-cuda12.6-cudnn9-devel"
 BRANCH="${BRANCH:-cheng-zo-optimizers}"
@@ -72,6 +74,7 @@ runai submit \
   --environment METHOD="${METHOD}" \
   --environment TASK="${TASK}" \
   --environment MODEL="${MODEL}" \
+  --environment SUFFIX="${SUFFIX}" \
   --environment BRANCH="${BRANCH}" \
   --environment LR="${LR:-}" \
   --environment MAX_STEPS="${MAX_STEPS:-}" \
@@ -122,7 +125,7 @@ runai submit \
     echo "[ckpt-dir] using: $CKPT (run as lichen)"
     set -e
     mkdir -p /tmp/lhome && chown 316680:30204 /tmp/lhome
-    su -p lichen -c "export HOME=/tmp/lhome PATH=/opt/conda/bin:/usr/bin:/bin HF_HOME=/tmp/hf HF_HUB_ENABLE_HF_TRANSFER=1 && cd $(pwd) && /opt/conda/bin/python train.py --config configs/${METHOD}.yaml --task ${TASK} --owner chengheng --ckpt-dir $CKPT ${MODEL:+--model $MODEL} ${LR:+--lr $LR} ${MAX_STEPS:+--max-steps $MAX_STEPS} ${EVAL_STEPS:+--eval-steps $EVAL_STEPS} ${EXTRA_ARGS:-}"
+    su -p lichen -c "export HOME=/tmp/lhome PATH=/opt/conda/bin:/usr/bin:/bin HF_HOME=/tmp/hf HF_HUB_ENABLE_HF_TRANSFER=1 && cd $(pwd) && /opt/conda/bin/python train.py --config configs/${METHOD}.yaml --task ${TASK} --owner chengheng --ckpt-dir $CKPT ${MODEL:+--model $MODEL} ${LR:+--lr $LR} ${MAX_STEPS:+--max-steps $MAX_STEPS} ${EVAL_STEPS:+--eval-steps $EVAL_STEPS} ${SUFFIX:+--run-suffix $SUFFIX} ${EXTRA_ARGS:-}"
   '
 
 cat <<EOF
