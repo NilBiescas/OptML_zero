@@ -516,9 +516,17 @@ def main():
     if push_to_hub:
         _assert_hub_writable(hub_repo_id)
 
-    # ---- WandB: resume the SAME run if we're picking up a prior ckpt ------
-    resumed_run_id   = (resume_meta or {}).get("wandb_run_id")
-    resumed_run_name = (resume_meta or {}).get("run_name")
+    # ---- WandB: ONE deterministic run per (owner, method, task, model) ----
+    # The run id is a stable hash of ckpt_key, so EVERY relaunch / preemption
+    # resumes the SAME wandb run (resume="allow") rather than forking a fresh
+    # duplicate — one continuous curve, no clutter. On the transient
+    # "run ID ... is in use" lock (a just-preempted sibling hasn't released yet)
+    # we WAIT and retry the same id instead of starting fresh. To begin a truly
+    # NEW run (e.g. a hyperparameter change), delete the wandb run first;
+    # relaunching then recreates it under the same id, fresh.
+    import hashlib
+    stable_id = "zo" + hashlib.md5(ckpt_key.encode()).hexdigest()[:14]
+    run_name  = f"{owner}-{opt_name}-{args.task}-{model_tag}"
     _wandb_base = dict(
         project="Zero-Order-Opt",
         entity="pilligua",   # team workspace — overrides any WANDB_ENTITY env
@@ -534,42 +542,25 @@ def main():
         settings=wandb.Settings(init_timeout=120),
     )
     run = None
-    if resumed_run_id and resumed_run_name:
-        # Try to continue the SAME run. But if that run was deleted on the
-        # server (or wandb is unreachable), resuming it hangs until timeout and
-        # would CRASH the job — so fall back to a fresh run instead of dying.
+    for _attempt in range(8):
         try:
-            run = wandb.init(id=resumed_run_id, resume="allow",
-                             name=resumed_run_name, **_wandb_base)
-            run_name = resumed_run_name
-            print(f"[Resume] continuing WandB run id={resumed_run_id} name={run_name}")
+            run = wandb.init(id=stable_id, resume="allow", name=run_name, **_wandb_base)
+            break
         except Exception as e:
-            print(f"[Resume] WARNING: could not resume WandB run {resumed_run_id} "
-                  f"({type(e).__name__}: {e}); starting a FRESH run instead.")
+            # "run ID ... is in use" => a just-preempted sibling still holds the
+            # lock; wait for it to release and retry the SAME id (do NOT fork a
+            # fresh duplicate run).
+            print(f"[wandb] init attempt {_attempt} for id={stable_id} failed "
+                  f"({type(e).__name__}: {e}); retrying in 20s")
             try:
                 wandb.finish(exit_code=1)
             except Exception:
                 pass
-            run = None
+            time.sleep(20)
     if run is None:
-        stamp    = datetime.now(timezone.utc).strftime("%m_%d_%H_%M_%S")
-        run_name = f"{owner}-{opt_name}-{args.task}-{model_tag}-{stamp}"
-        # Force a BRAND-NEW id each attempt: a failed resume above can leave a
-        # stale/locked id cached, and wandb then crash-loops with
-        # "run ID ... is in use". Generating a fresh id (and retrying) avoids it.
-        for _attempt in range(4):
-            try:
-                run = wandb.init(id=wandb.util.generate_id(), name=run_name, **_wandb_base)
-                break
-            except Exception as e:
-                print(f"[wandb] fresh init attempt {_attempt} failed "
-                      f"({type(e).__name__}: {e}); retrying with a new id")
-                try:
-                    wandb.finish(exit_code=1)
-                except Exception:
-                    pass
-        if run is None:
-            raise RuntimeError("wandb.init failed after 4 fresh attempts")
+        raise RuntimeError(f"wandb.init(id={stable_id}) failed after 8 attempts")
+    print(f"[WandB] run id={stable_id} name={run_name} (resume=allow, "
+          f"resumed={getattr(run, 'resumed', '?')})")
 
     # ---- Load task data ---------------------------------------------------
     spec, ds = load_task(args.task, num_train=num_train, seed=seed)
