@@ -20,15 +20,13 @@ training:
 optimizer:
   name: HiZOO
   kwargs:
-    lr: 5e-8                       # climbs to ~61% peak by step 1500 on Qwen3.5
-    eps: 1e-3                      # paper default
-    hessian_smooth_type: constant1e-8
-    weight_decay: 0.0
-    total_steps: 3000              # fast anneal: LR 5e-8→5e-9 by step 3000 to
-                                   # freeze the model at its peak (ZO noise
-                                   # degrades it otherwise — see sweep)
+    lr: 5e-8                       # best config on Qwen3.5: peaks ~61% (step 1500).
+    eps: 1e-3                      # Sweep showed faster decay/lower LR are worse;
+    hessian_smooth_type: constant1e-8  # ZO on this 0.8B multimodal model is
+    weight_decay: 0.0              # inherently noisy. Best checkpoint (~61%) is
+    total_steps: 20000             # the reported metric (live eval oscillates).
     lr_scheduler: cosine
-    lr_min_ratio: 0.1              # holds at 5e-9 after step 3000
+    lr_min_ratio: 0.1
 
 hub:
   push_to_hub: true
