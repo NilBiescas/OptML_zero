@@ -20,13 +20,15 @@ training:
 optimizer:
   name: HiZOO
   kwargs:
-    lr: 5e-8                       # most stable LR for the 0.8B model
+    lr: 5e-8                       # climbs to ~61% peak by step 1500 on Qwen3.5
     eps: 1e-3                      # paper default
     hessian_smooth_type: constant1e-8
     weight_decay: 0.0
-    total_steps: 20000             # gentle cosine over the full run
+    total_steps: 3000              # fast anneal: LR 5e-8→5e-9 by step 3000 to
+                                   # freeze the model at its peak (ZO noise
+                                   # degrades it otherwise — see sweep)
     lr_scheduler: cosine
-    lr_min_ratio: 0.1              # final LR = 5e-9
+    lr_min_ratio: 0.1              # holds at 5e-9 after step 3000
 
 hub:
   push_to_hub: true
