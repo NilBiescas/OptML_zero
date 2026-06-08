@@ -552,26 +552,40 @@ def main():
                 "_resumed_from":   args.resume_from,
                 "_hub_push":       push_to_hub,
                 "_hub_repo_id":    hub_repo_id},
-        settings=wandb.Settings(init_timeout=120),
+        settings=wandb.Settings(init_timeout=180),
     )
     run = None
-    for _attempt in range(8):
+    # The first online init can TIME OUT under wandb server load; that timeout
+    # still registers the id server-side, so every subsequent attempt fails with
+    # "run ID ... is in use" until the dead-process lock heartbeat expires
+    # (~5-10 min). Retry the SAME id long enough to outlast that lock (do NOT
+    # fork a fresh duplicate run). 15 attempts x 30s ~= 7.5 min covers it.
+    for _attempt in range(15):
         try:
             run = wandb.init(id=stable_id, resume="allow", name=run_name, **_wandb_base)
             break
         except Exception as e:
-            # "run ID ... is in use" => a just-preempted sibling still holds the
-            # lock; wait for it to release and retry the SAME id (do NOT fork a
-            # fresh duplicate run).
             print(f"[wandb] init attempt {_attempt} for id={stable_id} failed "
-                  f"({type(e).__name__}: {e}); retrying in 20s")
+                  f"({type(e).__name__}: {e}); retrying in 30s")
             try:
                 wandb.finish(exit_code=1)
             except Exception:
                 pass
-            time.sleep(20)
+            time.sleep(30)
     if run is None:
-        raise RuntimeError(f"wandb.init(id={stable_id}) failed after 8 attempts")
+        # Last resort: NEVER let a transient wandb hiccup kill a multi-hour GPU
+        # run. Fall back to OFFLINE mode (same deterministic id) so training
+        # proceeds and logs to disk; the run can be `wandb sync`ed later. The
+        # ckpt dir still lets it auto-resume after preemption.
+        print(f"[wandb] WARNING: online init failed after 15 attempts; "
+              f"falling back to OFFLINE mode for id={stable_id}")
+        try:
+            wandb.finish(exit_code=1)
+        except Exception:
+            pass
+        _offline = dict(_wandb_base)
+        _offline["settings"] = wandb.Settings(init_timeout=180, mode="offline")
+        run = wandb.init(id=stable_id, resume="allow", name=run_name, **_offline)
     print(f"[WandB] run id={stable_id} name={run_name} (resume=allow, "
           f"resumed={getattr(run, 'resumed', '?')})")
 
