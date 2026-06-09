@@ -1,7 +1,7 @@
 owner: nil
 
 model:
-  name: Qwen/Qwen3.5-2B
+  name: Qwen/Qwen2.5-0.5B-Instruct
   dtype: bfloat16
 
 training:
