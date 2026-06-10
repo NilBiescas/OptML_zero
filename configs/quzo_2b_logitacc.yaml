@@ -1,0 +1,25 @@
+# QuZO Qwen3.5-2B with logit_accuracy supervision (accuracy-as-loss experiment for RCP2)
+model:
+  load_in_8bit: false
+  name: Qwen/Qwen3.5-2B
+optimizer:
+  kwargs:
+    eps: 0.001
+    lr: 1.0e-06
+    lr_scheduler: cosine
+    num_pertub: 4
+    perturb_bits: 8
+    quantized_perturb: true
+    total_steps: 2000
+    wbit: 32
+    weight_decay: 0.0
+  name: QuZO
+owner: maria
+training:
+  batch_size: 16
+  eval_steps: 50
+  loss_type: logit_accuracy
+  max_steps: 2000
+  num_eval: 1000
+  num_train: 1000
+  seed: 42
