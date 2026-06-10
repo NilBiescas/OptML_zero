@@ -11,6 +11,7 @@ training:
   eval_steps: 500
   num_train: 1000
   num_eval: 1000
+  loss_type: "cross_entropy"  # options: "cross_entropy", "token_accuracy", "logit_accuracy"
 
 optimizer:
   name: LOZO

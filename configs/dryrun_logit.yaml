@@ -1,0 +1,27 @@
+owner: nil
+
+model:
+  name: Qwen/Qwen2.5-0.5B-Instruct
+  dtype: bfloat16
+
+training:
+  seed: 42
+  batch_size: 2
+  max_steps: 2
+  eval_steps: 2
+  num_train: 4
+  num_eval: 2
+  loss_type: "logit_accuracy"
+
+optimizer:
+  name: LOZO
+  use_cosine_scheduler: false
+  kwargs:
+    lr: 1e-7          
+    eps: 1e-4
+    weight_decay: 0.0
+    rank_r: 4             
+    step_interval: 10    
+
+hub:
+  push_to_hub: false

@@ -338,6 +338,9 @@ def main():
     eval_steps = cfg.get("training", {}).get("eval_steps", 500)
     num_train  = cfg.get("training", {}).get("num_train", 1000)
     num_eval   = cfg.get("training", {}).get("num_eval", 1000)
+    loss_type  = cfg.get("training", {}).get("loss_type", "cross_entropy")
+    if loss_type not in {"cross_entropy", "token_accuracy", "logit_accuracy"}:
+        raise ValueError(f"training.loss_type must be one of: cross_entropy, token_accuracy, logit_accuracy (got {loss_type})")
     model_name = cfg.get("model", {}).get("name", "Qwen/Qwen3.5-0.8B")
     # Default dtype is bfloat16: more stable than fp16 for long-horizon ZO
     # runs (RCP1 hit fp16 underflow during Sparse-MeZO replication on WiC).
@@ -453,6 +456,7 @@ def main():
             weights_src, trust_remote_code=True, torch_dtype=model_dtype,
         ).to(device)
     model.config.pad_token_id = tokenizer.pad_token_id
+    pad_id = tokenizer.pad_token_id
     # ZO assumes no dropout noise in the gradient estimate; FO trains with
     # dropout enabled like a normal first-order fine-tune.
     if is_first_order:
@@ -473,11 +477,18 @@ def main():
             p.param_name = name
 
     # ---- Tokenize train + build loader -----------------------------------
-    train_packs = [spec.format_train(ex, tokenizer) for ex in ds["train"]]
-    train_loader = DataLoader(
-        train_packs, batch_size=batch_size, shuffle=True,
-        collate_fn=lambda b: pad_collate(b, tokenizer.pad_token_id),
-    )
+    if loss_type == "logit_accuracy":
+        train_packs = [spec.format_eval(ex, tokenizer) for ex in ds["train"]]
+        train_loader = DataLoader(
+            train_packs, batch_size=batch_size, shuffle=True,
+            collate_fn=lambda b: b,
+        )
+    else:
+        train_packs = [spec.format_train(ex, tokenizer) for ex in ds["train"]]
+        train_loader = DataLoader(
+            train_packs, batch_size=batch_size, shuffle=True,
+            collate_fn=lambda b: pad_collate(b, pad_id),
+        )
 
     # ---- Optimizer --------------------------------------------------------
     optimizer = opt_cls(
@@ -570,7 +581,8 @@ def main():
         except StopIteration:
             train_iter = iter(train_loader)
             batch = next(train_iter)
-        batch = {k: v.to(device) for k, v in batch.items()}
+        if loss_type != "logit_accuracy":
+            batch = {k: v.to(device) for k, v in batch.items()}
 
         step_loss     = {"v": None}
         step_forwards = {"n": 0}
@@ -584,15 +596,115 @@ def main():
         def closure(need_output: bool = False):
             step_forwards["n"] += 1
             if not need_output:
-                out = model(
-                    input_ids=batch["input_ids"],
-                    attention_mask=batch["attention_mask"],
-                    labels=batch["labels"],
-                )
-                step_loss["v"] = out.loss.detach()
-                return out.loss
+                if loss_type == "logit_accuracy":
+                    rows = []
+                    for ex_i, ep in enumerate(batch):
+                        for c_idx, cand_ids in enumerate(ep["candidates"]):
+                            full = ep["prompt_ids"] + cand_ids
+                            rows.append((ex_i, c_idx, full, len(ep["prompt_ids"]), len(cand_ids)))
+                    max_len = max(len(r[2]) for r in rows)
+                    ids_list, attn_list = [], []
+                    for _, _, full, _, _ in rows:
+                        pad_n = max_len - len(full)
+                        ids_list.append(full + [pad_id] * pad_n)
+                        attn_list.append([1] * len(full) + [0] * pad_n)
+                    ids = torch.tensor(ids_list, dtype=torch.long, device=device)
+                    attn = torch.tensor(attn_list, dtype=torch.long, device=device)
+                    
+                    with torch.no_grad():
+                        logits = model(input_ids=ids, attention_mask=attn).logits
+                    
+                    log_probs = torch.log_softmax(logits, dim=-1)
+                    cand_lls = [[None] * len(ep["candidates"]) for ep in batch]
+                    for row_i, (ex_i, c_idx, full, prompt_len, cand_len) in enumerate(rows):
+                        ll = 0.0
+                        for k in range(cand_len):
+                            tok_id = full[prompt_len + k]
+                            ll += log_probs[row_i, prompt_len + k - 1, tok_id].item()
+                        ll /= max(1, cand_len)
+                        cand_lls[ex_i][c_idx] = ll
+                        
+                    correct = 0
+                    for ex_i, ep in enumerate(batch):
+                        scores = cand_lls[ex_i]
+                        pred = max(range(len(scores)), key=lambda c: scores[c])
+                        if pred == ep["gold_idx"]:
+                            correct += 1
+                    
+                    loss_t = torch.tensor(1.0 - (correct / len(batch)), device=device)
+                    step_loss["v"] = loss_t.detach()
+                    return loss_t
+                
+                elif loss_type == "token_accuracy":
+                    out = model(
+                        input_ids=batch["input_ids"],
+                        attention_mask=batch["attention_mask"],
+                    )
+                    shift_logits = out.logits[:, :-1, :]
+                    shift_labels = batch["labels"][:, 1:]
+                    mask = shift_labels != -100
+                    if mask.any():
+                        preds = shift_logits.argmax(dim=-1)
+                        correct = (preds[mask] == shift_labels[mask]).sum()
+                        token_acc = correct.float() / mask.sum()
+                    else:
+                        token_acc = torch.tensor(0.0, device=device)
+                    loss_t = 1.0 - token_acc
+                    step_loss["v"] = loss_t.detach()
+                    return loss_t
+                
+                else: # cross_entropy
+                    out = model(
+                        input_ids=batch["input_ids"],
+                        attention_mask=batch["attention_mask"],
+                        labels=batch["labels"],
+                    )
+                    step_loss["v"] = out.loss.detach()
+                    return out.loss
+
             # Enriched path: cheap forward up to logits, then CE with grad on
             # JUST the logits. Main model parameters never see autograd.
+            if loss_type == "logit_accuracy":
+                rows = []
+                for ex_i, ep in enumerate(batch):
+                    for c_idx, cand_ids in enumerate(ep["candidates"]):
+                        full = ep["prompt_ids"] + cand_ids
+                        rows.append((ex_i, c_idx, full, len(ep["prompt_ids"]), len(cand_ids)))
+                max_len = max(len(r[2]) for r in rows)
+                ids_list, attn_list = [], []
+                for _, _, full, _, _ in rows:
+                    pad_n = max_len - len(full)
+                    ids_list.append(full + [pad_id] * pad_n)
+                    attn_list.append([1] * len(full) + [0] * pad_n)
+                ids = torch.tensor(ids_list, dtype=torch.long, device=device)
+                attn = torch.tensor(attn_list, dtype=torch.long, device=device)
+                
+                with torch.no_grad():
+                    base_logits = model(input_ids=ids, attention_mask=attn).logits
+                logits = base_logits.detach().requires_grad_(True)
+                
+                log_probs = torch.log_softmax(logits, dim=-1)
+                cand_lls = [[None] * len(ep["candidates"]) for ep in batch]
+                for row_i, (ex_i, c_idx, full, prompt_len, cand_len) in enumerate(rows):
+                    ll = 0.0
+                    for k in range(cand_len):
+                        tok_id = full[prompt_len + k]
+                        ll += log_probs[row_i, prompt_len + k - 1, tok_id].item()
+                    ll /= max(1, cand_len)
+                    cand_lls[ex_i][c_idx] = ll
+                    
+                correct = 0
+                for ex_i, ep in enumerate(batch):
+                    scores = cand_lls[ex_i]
+                    pred = max(range(len(scores)), key=lambda c: scores[c])
+                    if pred == ep["gold_idx"]:
+                        correct += 1
+                
+                loss_t = torch.tensor(1.0 - (correct / len(batch)), device=device)
+                step_loss["v"] = loss_t.detach()
+                return loss_t.detach(), logits.detach(), torch.zeros_like(logits)
+
+            # For cross_entropy and token_accuracy, we run the model on batch["input_ids"]
             with torch.no_grad():
                 base_out = model(
                     input_ids=batch["input_ids"],
@@ -600,19 +712,32 @@ def main():
                 )
                 logits = base_out.logits.detach().requires_grad_(True)
                 del base_out
+
             with torch.enable_grad():
                 if opt_name == "PseuZO":
                     # PseuZO calls closure twice per batch. The second call is for 
                     # perturbed outputs and does not need gradients. Skipping 
                     # the backward pass here saves ~3GB of memory.
                     if step_forwards["n"] == 2:
-                        shift_logits = logits[..., :-1, :].contiguous()
-                        shift_labels = batch["labels"][..., 1:].contiguous()
-                        loss_t = F.cross_entropy(
-                            shift_logits.view(-1, shift_logits.size(-1)),
-                            shift_labels.view(-1),
-                            ignore_index=-100,
-                        )
+                        if loss_type == "token_accuracy":
+                            shift_logits = logits[..., :-1, :].contiguous()
+                            shift_labels = batch["labels"][..., 1:].contiguous()
+                            mask = shift_labels != -100
+                            if mask.any():
+                                preds = shift_logits.argmax(dim=-1)
+                                correct = (preds[mask] == shift_labels[mask]).sum()
+                                token_acc = correct.float() / mask.sum()
+                            else:
+                                token_acc = torch.tensor(0.0, device=logits.device)
+                            loss_t = 1.0 - token_acc
+                        else: # cross_entropy
+                            shift_logits = logits[..., :-1, :].contiguous()
+                            shift_labels = batch["labels"][..., 1:].contiguous()
+                            loss_t = F.cross_entropy(
+                                shift_logits.view(-1, shift_logits.size(-1)),
+                                shift_labels.view(-1),
+                                ignore_index=-100,
+                            )
                         step_loss["v"] = loss_t.detach()
                         return loss_t.detach(), logits.detach(), None
                         
@@ -620,56 +745,139 @@ def main():
                     # a massive peak memory spike during cross-entropy backprop.
                     grad_logits = torch.zeros_like(logits)
                     loss_sum = 0.0
-                    valid_tokens = (batch["labels"][..., 1:] != -100).sum().item()
+                    valid_tokens = 0
                     
                     for i in range(logits.size(0)):
                         # Small local graph for just 1 sequence
                         l_i = logits[i:i+1].detach().requires_grad_(True)
-                        shift_l = l_i[..., :-1, :].contiguous()
                         shift_lbl = batch["labels"][i:i+1, 1:].contiguous()
                         
-                        loss_i = F.cross_entropy(
-                            shift_l.view(-1, shift_l.size(-1)), 
-                            shift_lbl.view(-1), 
-                            ignore_index=-100, 
-                            reduction='sum'
-                        )
-                        if loss_i.item() > 0:
-                            grad_logits[i:i+1] = torch.autograd.grad(loss_i, l_i)[0].detach()
-                        loss_sum += loss_i.item()
-                        del l_i, shift_l, shift_lbl, loss_i
+                        if loss_type == "token_accuracy":
+                            shift_l = l_i[..., :-1, :].contiguous()
+                            mask = shift_lbl != -100
+                            if mask.any():
+                                preds = shift_l.argmax(dim=-1)
+                                correct = (preds[mask] == shift_lbl[mask]).sum()
+                                token_acc = correct.float() / mask.sum()
+                                loss_i = 1.0 - token_acc
+                                valid_tokens += 1
+                                loss_sum += loss_i.item()
+                            else:
+                                loss_i = torch.tensor(0.0, device=logits.device)
+                            
+                            if loss_i.requires_grad and loss_i.grad_fn is not None:
+                                grad_logits[i:i+1] = torch.autograd.grad(loss_i, l_i)[0].detach()
+                        else: # cross_entropy
+                            shift_l = l_i[..., :-1, :].contiguous()
+                            loss_i = F.cross_entropy(
+                                shift_l.view(-1, shift_l.size(-1)), 
+                                shift_lbl.view(-1), 
+                                ignore_index=-100, 
+                                reduction='sum'
+                            )
+                            tokens_i = (shift_lbl != -100).sum().item()
+                            valid_tokens += tokens_i
+                            if loss_i.item() > 0:
+                                grad_logits[i:i+1] = torch.autograd.grad(loss_i, l_i)[0].detach()
+                            loss_sum += loss_i.item()
+                        del l_i, shift_lbl, loss_i
                         
                     loss_t = torch.tensor(loss_sum / max(1, valid_tokens), device=logits.device)
-                    # In-place division avoids allocating a new 2.5GB tensor!
-                    grad_logits /= max(1, valid_tokens)
+                    if loss_type != "token_accuracy":
+                        grad_logits /= max(1, valid_tokens)
                 else:
-                    shift_logits = logits[..., :-1, :].contiguous()
-                    shift_labels = batch["labels"][..., 1:].contiguous()
-                    loss_t = F.cross_entropy(
-                        shift_logits.view(-1, shift_logits.size(-1)),
-                        shift_labels.view(-1),
-                        ignore_index=-100,
-                    )
-                    grad_logits = torch.autograd.grad(loss_t, logits)[0].detach()
+                    if loss_type == "token_accuracy":
+                        shift_logits = logits[..., :-1, :].contiguous()
+                        shift_labels = batch["labels"][..., 1:].contiguous()
+                        mask = shift_labels != -100
+                        if mask.any():
+                            preds = shift_logits.argmax(dim=-1)
+                            correct = (preds[mask] == shift_labels[mask]).sum()
+                            token_acc = correct.float() / mask.sum()
+                        else:
+                            token_acc = torch.tensor(0.0, device=logits.device)
+                        loss_t = 1.0 - token_acc
+                        grad_logits = torch.zeros_like(logits)
+                    else: # cross_entropy
+                        shift_logits = logits[..., :-1, :].contiguous()
+                        shift_labels = batch["labels"][..., 1:].contiguous()
+                        loss_t = F.cross_entropy(
+                            shift_logits.view(-1, shift_logits.size(-1)),
+                            shift_labels.view(-1),
+                            ignore_index=-100,
+                        )
+                        grad_logits = torch.autograd.grad(loss_t, logits)[0].detach()
                 
             step_loss["v"] = loss_t.detach()
             return loss_t.detach(), logits.detach(), grad_logits
 
         t0 = time.perf_counter()
         if is_first_order:
-            # Standard backprop training step. `closure` isn't used by FO
-            # optimizers — we just call the model directly so the loss is in
-            # the autograd graph. step_loss + step_forwards are populated
-            # manually to keep the wandb log shape identical to ZO runs.
+            # Standard backprop training step.
             optimizer.zero_grad(set_to_none=True)
-            out = model(
-                input_ids=batch["input_ids"],
-                attention_mask=batch["attention_mask"],
-                labels=batch["labels"],
-            )
-            loss_t = out.loss
-            loss_t.backward()
-            optimizer.step()
+            if loss_type == "logit_accuracy":
+                rows = []
+                for ex_i, ep in enumerate(batch):
+                    for c_idx, cand_ids in enumerate(ep["candidates"]):
+                        full = ep["prompt_ids"] + cand_ids
+                        rows.append((ex_i, c_idx, full, len(ep["prompt_ids"]), len(cand_ids)))
+                max_len = max(len(r[2]) for r in rows)
+                ids_list, attn_list = [], []
+                for _, _, full, _, _ in rows:
+                    pad_n = max_len - len(full)
+                    ids_list.append(full + [pad_id] * pad_n)
+                    attn_list.append([1] * len(full) + [0] * pad_n)
+                ids = torch.tensor(ids_list, dtype=torch.long, device=device)
+                attn = torch.tensor(attn_list, dtype=torch.long, device=device)
+                
+                out_logits = model(input_ids=ids, attention_mask=attn).logits
+                log_probs = torch.log_softmax(out_logits, dim=-1)
+                cand_lls = [[None] * len(ep["candidates"]) for ep in batch]
+                for row_i, (ex_i, c_idx, full, prompt_len, cand_len) in enumerate(rows):
+                    ll = 0.0
+                    for k in range(cand_len):
+                        tok_id = full[prompt_len + k]
+                        ll += log_probs[row_i, prompt_len + k - 1, tok_id].item()
+                    ll /= max(1, cand_len)
+                    cand_lls[ex_i][c_idx] = ll
+                    
+                correct = 0
+                for ex_i, ep in enumerate(batch):
+                    scores = cand_lls[ex_i]
+                    pred = max(range(len(scores)), key=lambda c: scores[c])
+                    if pred == ep["gold_idx"]:
+                        correct += 1
+                loss_t = torch.tensor(1.0 - (correct / len(batch)), device=device, requires_grad=True)
+            elif loss_type == "token_accuracy":
+                out = model(
+                    input_ids=batch["input_ids"],
+                    attention_mask=batch["attention_mask"],
+                )
+                shift_logits = out.logits[:, :-1, :]
+                shift_labels = batch["labels"][:, 1:]
+                mask = shift_labels != -100
+                if mask.any():
+                    preds = shift_logits.argmax(dim=-1)
+                    correct = (preds[mask] == shift_labels[mask]).sum()
+                    token_acc = correct.float() / mask.sum()
+                else:
+                    token_acc = torch.tensor(0.0, device=device)
+                loss_t = 1.0 - token_acc
+            else: # cross_entropy
+                out = model(
+                    input_ids=batch["input_ids"],
+                    attention_mask=batch["attention_mask"],
+                    labels=batch["labels"],
+                )
+                loss_t = out.loss
+                
+            if loss_t.requires_grad and loss_t.grad_fn is not None:
+                loss_t.backward()
+                optimizer.step()
+            else:
+                if global_step == 0 or global_step % 1000 == 0:
+                    print(f"[Warning] Loss has no gradient function for backpropagation (loss_type={loss_type}). Zero gradients applied.")
+            
             step_loss["v"]     = loss_t.detach()
             step_forwards["n"] = 1
         else:
