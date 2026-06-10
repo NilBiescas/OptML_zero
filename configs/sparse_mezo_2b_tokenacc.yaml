@@ -1,0 +1,27 @@
+# Sparse-MeZO Qwen3.5-2B with token_accuracy supervision (1 - token argmax acc)
+# Needs base-vllm:v1 image + packages_newt (transformers from git for qwen3_5).
+# 2.5x larger than Qwen3.5-0.8B; LR=1e-7 as validated for Qwen family.
+owner: maria
+
+model:
+  name: Qwen/Qwen3.5-2B
+
+training:
+  seed: 42
+  batch_size: 16
+  max_steps: 20000
+  eval_steps: 500
+  num_train: 1000
+  num_eval: 1000
+  loss_type: token_accuracy
+
+optimizer:
+  name: SparseMeZO
+  kwargs:
+    lr: 1.0e-7
+    eps: 1.0e-3
+    sparsity: 0.20
+    mask_mode: small_magnitude
+    mask_refresh: 1
+    weight_decay: 0.0
+    seed: 42
