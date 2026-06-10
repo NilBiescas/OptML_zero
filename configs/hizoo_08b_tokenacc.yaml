@@ -1,0 +1,34 @@
+# HiZOO (Zhao et al. ICLR 2025). Diagonal Hessian preconditioner (still pure ZO).
+# Implementation: optimizers/hizoo.py — see Yanjun-Zhao/HiZOO.
+owner: maria
+
+model:
+  name: Qwen/Qwen3.5-0.8B
+  dtype: float32                   # fp32: max numerical stability for HiZOO's
+                                   # 1/eps² Hessian term (fp16 overflows, bf16
+                                   # loses precision). ZO has no backprop so
+                                   # memory is not a constraint (~7GB total).
+
+training:
+  seed: 42
+  batch_size: 16
+  max_steps: 20000
+  eval_steps: 500
+  num_train: 1000
+  num_eval: 1000
+  loss_type: token_accuracy
+
+optimizer:
+  name: HiZOO
+  kwargs:
+    lr: 5e-8                       # best config on Qwen3.5: peaks ~61% (step 1500).
+    eps: 1e-3                      # Sweep showed faster decay/lower LR are worse;
+    hessian_smooth_type: constant1e-8  # ZO on this 0.8B multimodal model is
+    weight_decay: 0.0              # inherently noisy. Best checkpoint (~61%) is
+    total_steps: 20000             # the reported metric (live eval oscillates).
+    lr_scheduler: cosine
+    lr_min_ratio: 0.1
+
+hub:
+  push_to_hub: true
+  repo_id: mpilligua/zo-comparison-qwen
