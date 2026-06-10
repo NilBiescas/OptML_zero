@@ -1,0 +1,32 @@
+# HiZOO Qwen3.5-2B with logit_accuracy supervision (1 - LL-ranking acc = eval metric)
+owner: maria
+
+model:
+  name: Qwen/Qwen3.5-2B
+  dtype: float32                   # fp32 for HiZOO numerical stability; ZO is
+                                   # memory-cheap (no backprop). 2B fp32 ≈ 8GB
+                                   # weights + 8GB Hessian + acts, fits 80GB.
+
+training:
+  seed: 42
+  batch_size: 16
+  max_steps: 20000
+  eval_steps: 500
+  num_train: 1000
+  num_eval: 1000
+  loss_type: logit_accuracy
+
+optimizer:
+  name: HiZOO
+  kwargs:
+    lr: 5e-8
+    eps: 1e-3
+    hessian_smooth_type: constant1e-8
+    weight_decay: 0.0
+    total_steps: 20000
+    lr_scheduler: cosine
+    lr_min_ratio: 0.1
+
+hub:
+  push_to_hub: true
+  repo_id: mpilligua/zo-comparison-qwen

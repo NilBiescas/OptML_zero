@@ -143,6 +143,73 @@ def pad_collate(batch, pad_id):
 
 
 # --------------------------------------------------------------------------
+# Accuracy-as-loss (ported from nil_branch). ZO can optimize non-differentiable
+# objectives directly — these return the SAME metric used at eval as a scalar
+# loss = 1 - accuracy, so the optimizer maximizes accuracy directly instead of
+# minimizing a smooth surrogate (cross-entropy). Only valid for ZO (the closure
+# is no-grad); first-order optimizers cannot backprop through argmax.
+# --------------------------------------------------------------------------
+@torch.no_grad()
+def logit_accuracy_loss(model, batch, pad_id, device):
+    """1 - (fraction of examples whose gold candidate has the highest LL).
+
+    `batch` is a list of eval-packs: {prompt_ids, candidates, gold_idx}.
+    Mirrors the eval logit-ranking metric exactly (length-normalized LL).
+    """
+    rows = []  # (ex_i, c_idx, full_ids, prompt_len, cand_len)
+    for ex_i, ep in enumerate(batch):
+        for c_idx, cand_ids in enumerate(ep["candidates"]):
+            full = ep["prompt_ids"] + cand_ids
+            rows.append((ex_i, c_idx, full, len(ep["prompt_ids"]), len(cand_ids)))
+    max_len = max(len(r[2]) for r in rows)
+    ids_list, attn_list = [], []
+    for _, _, full, _, _ in rows:
+        pad_n = max_len - len(full)
+        ids_list.append(full + [pad_id] * pad_n)
+        attn_list.append([1] * len(full) + [0] * pad_n)
+    ids  = torch.tensor(ids_list,  dtype=torch.long, device=device)
+    attn = torch.tensor(attn_list, dtype=torch.long, device=device)
+    logits    = model(input_ids=ids, attention_mask=attn).logits
+    log_probs = torch.log_softmax(logits, dim=-1)
+
+    cand_lls = [[None] * len(ep["candidates"]) for ep in batch]
+    for row_i, (ex_i, c_idx, full, prompt_len, cand_len) in enumerate(rows):
+        # length-normalized LL of the candidate tokens (vectorized gather)
+        idx = torch.tensor(full[prompt_len:prompt_len + cand_len], device=device)
+        pos = torch.arange(prompt_len - 1, prompt_len - 1 + cand_len, device=device)
+        ll = log_probs[row_i, pos, idx].sum() / max(1, cand_len)
+        cand_lls[ex_i][c_idx] = ll
+
+    correct = 0
+    for ex_i, ep in enumerate(batch):
+        scores = cand_lls[ex_i]
+        pred = max(range(len(scores)), key=lambda c: scores[c].item())
+        if pred == ep["gold_idx"]:
+            correct += 1
+    return torch.tensor(1.0 - correct / len(batch), device=device)
+
+
+@torch.no_grad()
+def token_accuracy_loss(model, batch, device):
+    """1 - (fraction of gold completion tokens predicted by argmax).
+
+    `batch` is a tensor dict (same format as cross_entropy). Finer-grained than
+    logit_accuracy — averaged over many tokens, so a far less quantized ZO
+    signal (rarely exactly zero between perturbations).
+    """
+    out = model(input_ids=batch["input_ids"], attention_mask=batch["attention_mask"])
+    shift_logits = out.logits[:, :-1, :]
+    shift_labels = batch["labels"][:, 1:]
+    mask = shift_labels != -100
+    if mask.any():
+        preds = shift_logits.argmax(dim=-1)
+        token_acc = (preds[mask] == shift_labels[mask]).float().mean()
+    else:
+        token_acc = torch.tensor(0.0, device=device)
+    return 1.0 - token_acc
+
+
+# --------------------------------------------------------------------------
 # Evaluation: both token-level (argmax) and logit-level (LL ranking),
 # batched to keep eval overhead from dominating the run on H100.
 # --------------------------------------------------------------------------
@@ -332,6 +399,19 @@ def main():
     eval_steps = cfg.get("training", {}).get("eval_steps", 500)
     num_train  = cfg.get("training", {}).get("num_train", 1000)
     num_eval   = cfg.get("training", {}).get("num_eval", 1000)
+    # Supervision signal: cross_entropy (smooth, default) | token_accuracy |
+    # logit_accuracy. The two accuracy modes use 1-accuracy as the loss — only
+    # works for ZO (closure is no-grad); argmax is non-differentiable.
+    loss_type  = cfg.get("training", {}).get("loss_type", "cross_entropy")
+    if loss_type not in {"cross_entropy", "token_accuracy", "logit_accuracy"}:
+        raise ValueError(
+            f"training.loss_type must be cross_entropy|token_accuracy|logit_accuracy "
+            f"(got {loss_type!r})")
+    if loss_type != "cross_entropy" and is_first_order:
+        raise ValueError(
+            f"loss_type={loss_type!r} is non-differentiable and only works with a "
+            f"zeroth-order optimizer. {opt_name} is first-order — backprop through "
+            "argmax gives zero gradients. Use cross_entropy for first-order methods.")
     model_name = cfg.get("model", {}).get("name", "Qwen/Qwen3.5-0.8B")
     # Default dtype is bfloat16: more stable than fp16 for long-horizon ZO
     # runs (RCP1 hit fp16 underflow during Sparse-MeZO replication on WiC).
@@ -477,6 +557,7 @@ def main():
     if move_to_device:
         model = model.to(device)
     model.config.pad_token_id = tokenizer.pad_token_id
+    pad_id = tokenizer.pad_token_id   # used by the accuracy-loss closures
     # ZO assumes no dropout noise in the gradient estimate; FO trains with
     # dropout enabled like a normal first-order fine-tune.
     if is_first_order:
@@ -497,11 +578,20 @@ def main():
             p.param_name = name
 
     # ---- Tokenize train + build loader -----------------------------------
-    train_packs = [spec.format_train(ex, tokenizer) for ex in ds["train"]]
-    train_loader = DataLoader(
-        train_packs, batch_size=batch_size, shuffle=True,
-        collate_fn=lambda b: pad_collate(b, tokenizer.pad_token_id),
-    )
+    # logit_accuracy needs the candidate sets (format_eval); the collate keeps
+    # the batch as a list of eval-packs. The other modes use padded tensor dicts.
+    if loss_type == "logit_accuracy":
+        train_packs  = [spec.format_eval(ex, tokenizer) for ex in ds["train"]]
+        train_loader = DataLoader(
+            train_packs, batch_size=batch_size, shuffle=True,
+            collate_fn=lambda b: b,
+        )
+    else:
+        train_packs  = [spec.format_train(ex, tokenizer) for ex in ds["train"]]
+        train_loader = DataLoader(
+            train_packs, batch_size=batch_size, shuffle=True,
+            collate_fn=lambda b: pad_collate(b, tokenizer.pad_token_id),
+        )
 
     # ---- Optimizer --------------------------------------------------------
     optimizer = opt_cls(
@@ -578,7 +668,12 @@ def main():
             except StopIteration:
                 train_iter = iter(train_loader)
                 mb = next(train_iter)
-            micro_batches.append({k: v.to(device) for k, v in mb.items()})
+            # logit_accuracy batches are lists of eval-packs (kept on CPU);
+            # other modes are tensor dicts moved to device.
+            if loss_type == "logit_accuracy":
+                micro_batches.append(mb)
+            else:
+                micro_batches.append({k: v.to(device) for k, v in mb.items()})
         batch = micro_batches[0]  # ZO and logging use this
 
         step_loss     = {"v": None}
@@ -593,6 +688,14 @@ def main():
         def closure(need_output: bool = False):
             step_forwards["n"] += 1
             if not need_output:
+                if loss_type == "logit_accuracy":
+                    loss_t = logit_accuracy_loss(model, batch, pad_id, device)
+                    step_loss["v"] = loss_t.detach()
+                    return loss_t
+                if loss_type == "token_accuracy":
+                    loss_t = token_accuracy_loss(model, batch, device)
+                    step_loss["v"] = loss_t.detach()
+                    return loss_t
                 out = model(
                     input_ids=batch["input_ids"],
                     attention_mask=batch["attention_mask"],
