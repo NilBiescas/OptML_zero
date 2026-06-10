@@ -1,7 +1,7 @@
 owner: nil
 
 model:
-  name: Qwen/Qwen2.5-0.5B-Instruct
+  name: Qwen/Qwen3.5-0.8B
   dtype: bfloat16
 
 training:
@@ -11,7 +11,7 @@ training:
   eval_steps: 500
   num_train: 1000
   num_eval: 1000
-  loss_type: "cross_entropy"  # options: "cross_entropy", "token_accuracy", "logit_accuracy"
+  loss_type: "token_accuracy"  # options: "cross_entropy", "token_accuracy", "logit_accuracy"
 
 optimizer:
   name: LOZO
