@@ -101,10 +101,29 @@ def bench_one(method, task, batch_size, steps, device, out_path, model_name):
 
     def make_closure(batch):
         def closure(need_output=False):
-            out = model(input_ids=batch["input_ids"],
-                        attention_mask=batch["attention_mask"],
-                        labels=batch["labels"])
-            return out.loss
+            if not need_output:
+                out = model(input_ids=batch["input_ids"],
+                            attention_mask=batch["attention_mask"],
+                            labels=batch["labels"])
+                return out.loss
+            # Enriched path (PseuZO): forward to last hidden, CE with grad on
+            # JUST the hidden state — same as train.py's need_output branch.
+            import torch.nn.functional as F
+            with torch.no_grad():
+                base_out = model(input_ids=batch["input_ids"],
+                                 attention_mask=batch["attention_mask"],
+                                 output_hidden_states=True)
+            last_hidden = base_out.hidden_states[-1].detach().requires_grad_(True)
+            lm_head = getattr(model, "lm_head", None) or model.get_output_embeddings()
+            with torch.enable_grad():
+                logits = lm_head(last_hidden)
+                shift_logits = logits[..., :-1, :].contiguous()
+                shift_labels = batch["labels"][..., 1:].contiguous()
+                loss_t = F.cross_entropy(
+                    shift_logits.view(-1, shift_logits.size(-1)),
+                    shift_labels.view(-1), ignore_index=-100)
+                loss_t.backward()
+            return loss_t.detach(), last_hidden.detach(), last_hidden.grad.detach()
         return closure
 
     def do_step(batch):
