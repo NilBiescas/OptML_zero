@@ -157,6 +157,7 @@ def evaluate(model, tokenizer, val_examples, spec, device, eval_batch_size=8, ev
     # -------- token-level: standard cross-entropy over gold completion --------
     train_packs = [spec.format_train(ex, tokenizer) for ex in val_examples]
     token_correct = token_total = 0
+    token_preds_list = []
     for start in range(0, len(train_packs), eval_batch_size):
         chunk = train_packs[start:start + eval_batch_size]
         b = pad_collate(chunk, pad_id)
@@ -166,10 +167,21 @@ def evaluate(model, tokenizer, val_examples, spec, device, eval_batch_size=8, ev
         shift_logits = out.logits[:, :-1, :]
         shift_labels = b["labels"][:, 1:]
         mask = shift_labels != -100
+        preds = shift_logits.argmax(dim=-1)
         if mask.any():
-            preds = shift_logits.argmax(dim=-1)
             token_correct += (preds[mask] == shift_labels[mask]).sum().item()
             token_total   += mask.sum().item()
+
+        for i in range(len(chunk)):
+            mask_i = shift_labels[i] != -100
+            if mask_i.any():
+                preds_i = preds[i][mask_i]
+                labels_i = shift_labels[i][mask_i]
+                pred_tok_str = tokenizer.decode(preds_i)
+                gt_tok_str = tokenizer.decode(labels_i)
+                token_preds_list.append((pred_tok_str, gt_tok_str))
+            else:
+                token_preds_list.append(("", ""))
 
     # -------- logit-level: rank candidates by length-normalized LL ----------
     eval_packs = [spec.format_eval(ex, tokenizer) for ex in val_examples]
@@ -214,14 +226,28 @@ def evaluate(model, tokenizer, val_examples, spec, device, eval_batch_size=8, ev
 
         if eval_only:
             prompt_str = tokenizer.decode(ep["prompt_ids"]).strip()
-            pred_text  = tokenizer.decode(ep["candidates"][pred]).strip()
-            gt_text    = tokenizer.decode(ep["candidates"][ep["gold_idx"]]).strip()
-            is_correct = "CORRECT" if pred == ep["gold_idx"] else "INCORRECT"
+            
+            # Logit-level details
+            pred_logit_text  = tokenizer.decode(ep["candidates"][pred]).strip()
+            gt_logit_text    = tokenizer.decode(ep["candidates"][ep["gold_idx"]]).strip()
+            logit_is_correct = "CORRECT" if pred == ep["gold_idx"] else "INCORRECT"
+            
+            # Token-level details
+            pred_tok_text, gt_tok_text = token_preds_list[ex_i]
+            pred_tok_text = pred_tok_text.strip()
+            gt_tok_text   = gt_tok_text.strip()
+            tok_is_correct = "CORRECT" if pred_tok_text == gt_tok_text else "INCORRECT"
+            
             print("-" * 60)
             print(f"Prompt:\n{prompt_str}")
-            print(f"Predicted Answer: {pred_text}")
-            print(f"Ground Truth Answer: {gt_text}")
-            print(f"Status: {is_correct}")
+            print(f"--- Logit-Level Evaluation (Forced Choice) ---")
+            print(f"  Predicted Choice: {pred_logit_text}")
+            print(f"  Ground Truth:     {gt_logit_text}")
+            print(f"  Status:           {logit_is_correct}")
+            print(f"--- Token-Level Evaluation (Free Generation) ---")
+            print(f"  Argmax Predicted Token: {repr(pred_tok_text)}")
+            print(f"  Ground Truth Token:     {repr(gt_tok_text)}")
+            print(f"  Status:                 {tok_is_correct}")
 
     return {
         "eval/token_accuracy": (token_correct / token_total) if token_total else 0.0,
