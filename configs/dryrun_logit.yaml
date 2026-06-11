@@ -12,6 +12,7 @@ training:
   num_train: 4
   num_eval: 2
   loss_type: "logit_accuracy"
+  eval_only: false
 
 optimizer:
   name: LOZO

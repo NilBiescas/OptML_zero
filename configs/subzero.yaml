@@ -12,6 +12,7 @@ training:
   num_train: 1000
   num_eval: 1000
   loss_type: "logit_accuracy"  # options: "cross_entropy", "token_accuracy", "logit_accuracy"
+  eval_only: false
 
 optimizer:
   name: SubZero

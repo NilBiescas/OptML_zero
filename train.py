@@ -467,7 +467,8 @@ def main():
         model.eval()
 
     # ---- Eval-only branch ------------------------------------------------
-    if args.eval_only:
+    eval_only = args.eval_only or cfg.get("training", {}).get("eval_only", False)
+    if eval_only:
         print(f"[Eval Only] Running zero-shot evaluation on {args.task}...")
         ev = evaluate(model, tokenizer, val_examples, spec, device,
                       eval_batch_size=args.eval_batch_size)
