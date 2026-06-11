@@ -58,9 +58,10 @@ def load_optimizer_cls(name):
 
 def bench_one(method, task, batch_size, steps, device, out_path):
     cfg = yaml.safe_load(open(f"configs/{method}.yaml"))
-    opt_name = cfg["optimizer"]["name"]
     opt_kwargs = cfg["optimizer"].get("kwargs", {}) or {}
-    opt_cls = load_optimizer_cls(opt_name)
+    # Module = config stem (e.g. zo_muon -> optimizers/zo_muon.py), NOT the
+    # optimizer class name ("ZOMuon" has no optimizers/zomuon.py).
+    opt_cls = load_optimizer_cls(method)
 
     set_seed(42)
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
