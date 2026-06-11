@@ -323,6 +323,8 @@ def main():
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
 
+    eval_only = args.eval_only or cfg.get("training", {}).get("eval_only", False)
+
     owner = args.owner or os.environ.get("RUN_OWNER") or cfg.get("owner")
     if owner not in {"maria", "nil", "cheng"}:
         raise ValueError(
@@ -416,12 +418,16 @@ def main():
         print(f"[Resume] continuing WandB run id={resumed_run_id} name={run_name}")
     else:
         stamp    = datetime.now(timezone.utc).strftime("%m_%d_%H_%M_%S")
-        run_name = f"{owner}-{opt_name}-{args.task}-{stamp}"
+        prefix   = "0-shot-" if eval_only else ""
+        run_name = f"{prefix}{owner}-{opt_name}-{args.task}-{stamp}"
+        tags = [owner, opt_name, args.task]
+        if eval_only:
+            tags.append("0-shot")
         wandb.init(
             project="Zero-Order-Opt",
             name=run_name,
             group=args.task,                          # group all multirc / all copa together
-            tags=[owner, opt_name, args.task],        # filter in the dashboard
+            tags=tags,                                # filter in the dashboard
             config={**cfg, "task": args.task, "owner": owner,
                     "_resolved_seed": seed,
                     "_resolved_dtype": dtype_str,
@@ -467,7 +473,6 @@ def main():
         model.eval()
 
     # ---- Eval-only branch ------------------------------------------------
-    eval_only = args.eval_only or cfg.get("training", {}).get("eval_only", False)
     if eval_only:
         print(f"[Eval Only] Running zero-shot evaluation on {args.task}...")
         ev = evaluate(model, tokenizer, val_examples, spec, device,

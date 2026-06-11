@@ -1,0 +1,21 @@
+owner: nil
+
+model:
+  name: Qwen/Qwen3.5-0.8B
+  dtype: bfloat16
+
+training:
+  seed: 42
+  batch_size: 16
+  max_steps: 20000
+  eval_steps: 500
+  num_train: 1000
+  num_eval: 1000
+  loss_type: "logit_accuracy"
+  eval_only: true
+
+optimizer:
+  name: LOZO
+
+hub:
+  push_to_hub: false
