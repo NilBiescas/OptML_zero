@@ -146,6 +146,14 @@ def parse_args():
     p.add_argument("--warmup-ratio", type=float, default=None,
                    help="Fraction of max_steps for linear LR warmup (overrides "
                         "training.warmup_ratio; default 0).")
+    p.add_argument("--loss-type", default=None,
+                   choices=["cross_entropy", "token_accuracy", "logit_accuracy"],
+                   help="Training objective (overrides training.loss_type). ZO needs "
+                        "no gradients, so it can optimize ACCURACY directly: "
+                        "token_accuracy = 1 - argmax-token accuracy on the gold "
+                        "completion; logit_accuracy = 1 - candidate-ranking accuracy "
+                        "(the eval metric itself). First-order opts require "
+                        "cross_entropy (accuracy is non-differentiable).")
     return p.parse_args()
 
 
@@ -438,6 +446,23 @@ def main():
     if args.eval_steps is not None:
         print(f"[eval-steps-override] {eval_steps} -> {args.eval_steps}")
         eval_steps = args.eval_steps
+    # ---- Training objective (ported from nil_branch) -----------------------
+    # ZO is gradient-free, so the objective need not be differentiable:
+    #   cross_entropy   = standard CE on the gold completion (default)
+    #   token_accuracy  = 1 - per-token argmax accuracy on the gold completion
+    #   logit_accuracy  = 1 - candidate-ranking accuracy (the EVAL metric itself,
+    #                     optimized directly; train batches use eval format)
+    loss_type = cfg.get("training", {}).get("loss_type", "cross_entropy")
+    if args.loss_type is not None:
+        print(f"[loss-type-override] {loss_type} -> {args.loss_type}")
+        loss_type = args.loss_type
+    if loss_type not in {"cross_entropy", "token_accuracy", "logit_accuracy"}:
+        raise ValueError(f"training.loss_type must be one of: cross_entropy, "
+                         f"token_accuracy, logit_accuracy (got {loss_type})")
+    if is_first_order and loss_type != "cross_entropy":
+        raise ValueError(f"loss_type={loss_type} requires gradients-free ZO; "
+                         f"first-order {opt_name} only supports cross_entropy")
+    print(f"[loss-type] {loss_type}")
     # ---- LR scheduler (default constant = ZO-paper convention) ------------
     lr_sched = (args.lr_scheduler
                 or cfg.get("training", {}).get("lr_scheduler") or "constant")
@@ -570,8 +595,10 @@ def main():
         entity="pilligua",   # team workspace — overrides any WANDB_ENTITY env
         group=args.task,     # group all multirc / all copa together
         tags=[owner, opt_name, args.task, model_tag]
-             + ([args.run_suffix] if args.run_suffix else []) + _extra_tags,
+             + ([args.run_suffix] if args.run_suffix else [])
+             + ([loss_type] if loss_type != "cross_entropy" else []) + _extra_tags,
         config={**cfg, "task": args.task, "owner": owner,
+                "loss_type": loss_type,
                 "model": model_name, "model_tag": model_tag,
                 "_resolved_seed": seed,
                 "_resolved_dtype": dtype_str,
@@ -679,11 +706,22 @@ def main():
         return
 
     # ---- Tokenize train + build loader -----------------------------------
-    train_packs = [spec.format_train(ex, tokenizer) for ex in ds["train"]]
-    train_loader = DataLoader(
-        train_packs, batch_size=batch_size, shuffle=True,
-        collate_fn=lambda b: pad_collate(b, tokenizer.pad_token_id),
-    )
+    pad_id = tokenizer.pad_token_id
+    if loss_type == "logit_accuracy":
+        # Optimize the EVAL metric directly: batches are eval-format packs
+        # (prompt + answer candidates + gold idx); the closure ranks candidates
+        # by length-normalized LL and returns 1 - batch accuracy.
+        train_packs = [spec.format_eval(ex, tokenizer) for ex in ds["train"]]
+        train_loader = DataLoader(
+            train_packs, batch_size=batch_size, shuffle=True,
+            collate_fn=lambda b: b,   # keep as a list of packs
+        )
+    else:
+        train_packs = [spec.format_train(ex, tokenizer) for ex in ds["train"]]
+        train_loader = DataLoader(
+            train_packs, batch_size=batch_size, shuffle=True,
+            collate_fn=lambda b: pad_collate(b, pad_id),
+        )
 
     # First-order (AdamW) does REAL backprop, so it needs the full autograd
     # graph + grads + optimizer moments — unlike the forward-only ZO methods.
@@ -765,7 +803,10 @@ def main():
         except StopIteration:
             train_iter = iter(train_loader)
             batch = next(train_iter)
-        batch = {k: v.to(device) for k, v in batch.items()}
+        if loss_type != "logit_accuracy":
+            batch = {k: v.to(device) for k, v in batch.items()}
+        # (logit_accuracy batches are lists of eval packs; tensors are built
+        #  inside the closure)
 
         step_loss     = {"v": None}
         step_forwards = {"n": 0}
@@ -779,6 +820,63 @@ def main():
         def closure(need_output: bool = False):
             step_forwards["n"] += 1
             if not need_output:
+                if loss_type == "logit_accuracy":
+                    # Accuracy AS the objective (ported from nil_branch): rank
+                    # each example's candidates by length-normalized LL exactly
+                    # like evaluate(), return 1 - batch accuracy. Non-
+                    # differentiable (piecewise-constant) — fine for ZO/SPSA.
+                    rows = []
+                    for ex_i, ep in enumerate(batch):
+                        for c_idx, cand_ids in enumerate(ep["candidates"]):
+                            full = ep["prompt_ids"] + cand_ids
+                            rows.append((ex_i, c_idx, full,
+                                         len(ep["prompt_ids"]), len(cand_ids)))
+                    max_len = max(len(r[2]) for r in rows)
+                    ids_list, attn_list = [], []
+                    for _, _, full, _, _ in rows:
+                        pad_n = max_len - len(full)
+                        ids_list.append(full + [pad_id] * pad_n)
+                        attn_list.append([1] * len(full) + [0] * pad_n)
+                    ids  = torch.tensor(ids_list,  dtype=torch.long, device=device)
+                    attn = torch.tensor(attn_list, dtype=torch.long, device=device)
+                    with torch.no_grad():
+                        logits = model(input_ids=ids, attention_mask=attn).logits
+                    log_probs = torch.log_softmax(logits, dim=-1)
+                    cand_lls = [[None] * len(ep["candidates"]) for ep in batch]
+                    for row_i, (ex_i, c_idx, full, prompt_len, cand_len) in enumerate(rows):
+                        ll = 0.0
+                        for k in range(cand_len):
+                            tok_id = full[prompt_len + k]
+                            ll += log_probs[row_i, prompt_len + k - 1, tok_id].item()
+                        ll /= max(1, cand_len)
+                        cand_lls[ex_i][c_idx] = ll
+                    correct = 0
+                    for ex_i, ep in enumerate(batch):
+                        scores = cand_lls[ex_i]
+                        pred = max(range(len(scores)), key=lambda c: scores[c])
+                        if pred == ep["gold_idx"]:
+                            correct += 1
+                    loss_t = torch.tensor(1.0 - (correct / len(batch)), device=device)
+                    step_loss["v"] = loss_t.detach()
+                    return loss_t
+                if loss_type == "token_accuracy":
+                    # 1 - argmax-token accuracy over the gold completion.
+                    out = model(
+                        input_ids=batch["input_ids"],
+                        attention_mask=batch["attention_mask"],
+                    )
+                    shift_logits = out.logits[:, :-1, :]
+                    shift_labels = batch["labels"][:, 1:]
+                    mask = shift_labels != -100
+                    if mask.any():
+                        preds = shift_logits.argmax(dim=-1)
+                        token_acc = ((preds[mask] == shift_labels[mask]).sum().float()
+                                     / mask.sum())
+                    else:
+                        token_acc = torch.tensor(0.0, device=device)
+                    loss_t = 1.0 - token_acc
+                    step_loss["v"] = loss_t.detach()
+                    return loss_t
                 out = model(
                     input_ids=batch["input_ids"],
                     attention_mask=batch["attention_mask"],
@@ -789,6 +887,9 @@ def main():
             # Enriched path: cheap forward up to last hidden state, then a
             # tiny lm_head + CE with grad on JUST the hidden state. Main
             # model parameters never see autograd.
+            if loss_type != "cross_entropy":
+                raise RuntimeError("closure(need_output=True) requires "
+                                   "loss_type=cross_entropy (CE-on-logits path)")
             with torch.no_grad():
                 base_out = model(
                     input_ids=batch["input_ids"],
