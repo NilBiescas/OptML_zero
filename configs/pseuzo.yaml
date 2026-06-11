@@ -20,7 +20,7 @@ optimizer:
     lr: 1e-7              # matches submit_pseuzo.sh LR
     eps: 1e-4
     weight_decay: 0.0
-    sliding_window_length: 6
+    sliding_window_length: 4
     momentum_fb: 0.9
 
 hub:
