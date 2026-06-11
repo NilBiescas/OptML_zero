@@ -56,12 +56,18 @@ def load_optimizer_cls(name):
     raise ValueError(f"no Optimizer subclass in optimizers/{name}")
 
 
+FIRST_ORDER = {"AdamW": torch.optim.AdamW, "Adam": torch.optim.Adam,
+               "SGD": torch.optim.SGD}
+
+
 def bench_one(method, task, batch_size, steps, device, out_path, model_name):
     cfg = yaml.safe_load(open(f"configs/{method}.yaml"))
     opt_kwargs = cfg["optimizer"].get("kwargs", {}) or {}
-    # Module = config stem (e.g. zo_muon -> optimizers/zo_muon.py), NOT the
+    opt_name = cfg["optimizer"]["name"]
+    is_first_order = opt_name in FIRST_ORDER
+    # ZO module = config stem (e.g. zo_muon -> optimizers/zo_muon.py), NOT the
     # optimizer class name ("ZOMuon" has no optimizers/zomuon.py).
-    opt_cls = load_optimizer_cls(method)
+    opt_cls = FIRST_ORDER[opt_name] if is_first_order else load_optimizer_cls(method)
 
     set_seed(42)
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -70,6 +76,11 @@ def bench_one(method, task, batch_size, steps, device, out_path, model_name):
     model = AutoModelForCausalLM.from_pretrained(
         model_name, torch_dtype=torch.float32).to(device)
     model.eval()  # dropout off: deterministic timing
+    if is_first_order and hasattr(model, "gradient_checkpointing_enable"):
+        # Same as train.py's first-order path: AdamW does real backprop and
+        # needs gradient checkpointing to fit bs=16 fp32 on MultiRC.
+        model.config.use_cache = False
+        model.gradient_checkpointing_enable()
 
     # Same param annotations train.py applies (DiZO/ZO-Muon read these).
     for i, (name, p) in enumerate(model.named_parameters()):
@@ -96,15 +107,27 @@ def bench_one(method, task, batch_size, steps, device, out_path, model_name):
             return out.loss
         return closure
 
+    def do_step(batch):
+        if is_first_order:
+            # forward + backward + update (train.py's first-order path)
+            optimizer.zero_grad(set_to_none=True)
+            out = model(input_ids=batch["input_ids"],
+                        attention_mask=batch["attention_mask"],
+                        labels=batch["labels"])
+            out.loss.backward()
+            optimizer.step()
+        else:
+            optimizer.step(make_closure(batch))
+
     # Warmup step (cuda init, lazy allocs) -- excluded from stats.
-    optimizer.step(make_closure(batches[0]))
+    do_step(batches[0])
     torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats()
 
     times, resident = [], []
     for b in batches[1:]:
         t0 = time.perf_counter()
-        optimizer.step(make_closure(b))
+        do_step(b)
         torch.cuda.synchronize()
         times.append(time.perf_counter() - t0)
         # resident (avg) memory: what stays allocated BETWEEN steps —
