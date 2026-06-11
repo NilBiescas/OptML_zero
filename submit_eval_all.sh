@@ -13,10 +13,11 @@ if [ -f .env ]; then
     export $(grep -v '^#' .env | xargs)
 fi
 
-MODELS=("eval_qwen_0_5b" "eval_qwen_0_8b" "eval_qwen_2b")
+MODELS=("eval_qwen_0_5b" "eval_qwen_0_5b_instruct" "eval_qwen_0_8b" "eval_qwen_2b")
 
 for CFG in "${MODELS[@]}"; do
     JOB_NAME="${GASPAR}-${CFG}-${DATASET}-$(date +%H%M%S)"
+    JOB_NAME="${JOB_NAME//_/-}"
     echo ">>> Submitting zero-shot evaluation for ${CFG} on ${DATASET}..."
     
     runai submit \

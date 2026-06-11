@@ -150,7 +150,7 @@ def pad_collate(batch, pad_id):
 # batched to keep eval overhead from dominating the run on H100.
 # --------------------------------------------------------------------------
 @torch.no_grad()
-def evaluate(model, tokenizer, val_examples, spec, device, eval_batch_size=8):
+def evaluate(model, tokenizer, val_examples, spec, device, eval_batch_size=8, eval_only=False):
     model.eval()
     pad_id = tokenizer.pad_token_id
 
@@ -211,6 +211,17 @@ def evaluate(model, tokenizer, val_examples, spec, device, eval_batch_size=8):
         pred   = max(range(n_c), key=lambda c: scores[c])
         if pred == ep["gold_idx"]:
             logit_correct += 1
+
+        if eval_only:
+            prompt_str = tokenizer.decode(ep["prompt_ids"]).strip()
+            pred_text  = tokenizer.decode(ep["candidates"][pred]).strip()
+            gt_text    = tokenizer.decode(ep["candidates"][ep["gold_idx"]]).strip()
+            is_correct = "CORRECT" if pred == ep["gold_idx"] else "INCORRECT"
+            print("-" * 60)
+            print(f"Prompt:\n{prompt_str}")
+            print(f"Predicted Answer: {pred_text}")
+            print(f"Ground Truth Answer: {gt_text}")
+            print(f"Status: {is_correct}")
 
     return {
         "eval/token_accuracy": (token_correct / token_total) if token_total else 0.0,
@@ -476,7 +487,7 @@ def main():
     if eval_only:
         print(f"[Eval Only] Running zero-shot evaluation on {args.task}...")
         ev = evaluate(model, tokenizer, val_examples, spec, device,
-                      eval_batch_size=args.eval_batch_size)
+                      eval_batch_size=args.eval_batch_size, eval_only=eval_only)
         print(f"[Eval Only] Result: logit_acc={ev['eval/logit_accuracy']:.4f}  "
               f"token_acc={ev['eval/token_accuracy']:.4f}")
         if wandb.run is not None:
