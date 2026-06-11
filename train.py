@@ -124,6 +124,8 @@ def parse_args():
     p.add_argument("--resume-from", default=None,
                    help="Path to a prior run's `last/` dir to resume from "
                         "(reuses model weights + optimizer state + step/forward/best counters)")
+    p.add_argument("--eval-only", action="store_true",
+                   help="Evaluate the model on the task in a zero-shot fashion and exit")
     return p.parse_args()
 
 
@@ -463,6 +465,20 @@ def main():
         model.train()
     else:
         model.eval()
+
+    # ---- Eval-only branch ------------------------------------------------
+    if args.eval_only:
+        print(f"[Eval Only] Running zero-shot evaluation on {args.task}...")
+        ev = evaluate(model, tokenizer, val_examples, spec, device,
+                      eval_batch_size=args.eval_batch_size)
+        print(f"[Eval Only] Result: logit_acc={ev['eval/logit_accuracy']:.4f}  "
+              f"token_acc={ev['eval/token_accuracy']:.4f}")
+        if wandb.run is not None:
+            for k, v in ev.items():
+                wandb.run.summary[k] = v
+            wandb.log(ev, step=0)
+            wandb.finish()
+        return
 
     # Param-id + param-name injection.
     # - param_id keeps per-param RNG seeds in lock-step across ranks (LOZO,
