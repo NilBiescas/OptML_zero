@@ -101,20 +101,25 @@ def bench_one(method, task, batch_size, steps, device, out_path):
     torch.cuda.synchronize()
     torch.cuda.reset_peak_memory_stats()
 
-    times = []
+    times, resident = [], []
     for b in batches[1:]:
         t0 = time.perf_counter()
         optimizer.step(make_closure(b))
         torch.cuda.synchronize()
         times.append(time.perf_counter() - t0)
+        # resident (avg) memory: what stays allocated BETWEEN steps —
+        # weights + optimizer state, after activations are freed.
+        resident.append(torch.cuda.memory_allocated())
 
     s_per_step = sum(times) / len(times)
     peak_gb = torch.cuda.max_memory_allocated() / 1024**3
+    avg_gb = (sum(resident) / len(resident)) / 1024**3
     rec = {"method": method, "task": task, "model": MODEL_NAME,
            "batch_size": batch_size, "timed_steps": len(times),
-           "s_per_step": round(s_per_step, 4), "peak_GB": round(peak_gb, 2)}
-    line = (f"{method:8} {task:8} bs={batch_size:<3} steps={len(times):<3} "
-            f"s/step={s_per_step:.3f}  peak={peak_gb:.2f} GB")
+           "s_per_step": round(s_per_step, 4), "peak_GB": round(peak_gb, 2),
+           "avg_GB": round(avg_gb, 2)}
+    line = (f"{method:11} {task:8} bs={batch_size:<3} steps={len(times):<3} "
+            f"s/step={s_per_step:.3f}  peak={peak_gb:.2f} GB  avg={avg_gb:.2f} GB")
     print("[bench] " + line, flush=True)
     with open(out_path, "a") as f:
         f.write(json.dumps(rec) + "\n")
