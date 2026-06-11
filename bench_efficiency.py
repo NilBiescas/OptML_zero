@@ -26,7 +26,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, set_seed
 
 from tasks import load_task
 
-MODEL_NAME = "Qwen/Qwen3.5-0.8B"
+DEFAULT_MODEL = "Qwen/Qwen3.5-0.8B"
 METHODS = ["mezo", "conmezo", "fzoo", "zo_muon", "dizo"]
 TASKS = ["multirc", "copa"]
 
@@ -56,7 +56,7 @@ def load_optimizer_cls(name):
     raise ValueError(f"no Optimizer subclass in optimizers/{name}")
 
 
-def bench_one(method, task, batch_size, steps, device, out_path):
+def bench_one(method, task, batch_size, steps, device, out_path, model_name):
     cfg = yaml.safe_load(open(f"configs/{method}.yaml"))
     opt_kwargs = cfg["optimizer"].get("kwargs", {}) or {}
     # Module = config stem (e.g. zo_muon -> optimizers/zo_muon.py), NOT the
@@ -64,11 +64,11 @@ def bench_one(method, task, batch_size, steps, device, out_path):
     opt_cls = load_optimizer_cls(method)
 
     set_seed(42)
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
     model = AutoModelForCausalLM.from_pretrained(
-        MODEL_NAME, torch_dtype=torch.float32).to(device)
+        model_name, torch_dtype=torch.float32).to(device)
     model.eval()  # dropout off: deterministic timing
 
     # Same param annotations train.py applies (DiZO/ZO-Muon read these).
@@ -114,7 +114,7 @@ def bench_one(method, task, batch_size, steps, device, out_path):
     s_per_step = sum(times) / len(times)
     peak_gb = torch.cuda.max_memory_allocated() / 1024**3
     avg_gb = (sum(resident) / len(resident)) / 1024**3
-    rec = {"method": method, "task": task, "model": MODEL_NAME,
+    rec = {"method": method, "task": task, "model": model_name,
            "batch_size": batch_size, "timed_steps": len(times),
            "s_per_step": round(s_per_step, 4), "peak_GB": round(peak_gb, 2),
            "avg_GB": round(avg_gb, 2)}
@@ -135,16 +135,17 @@ def main():
     ap.add_argument("--batch-size", type=int, default=1)
     ap.add_argument("--steps", type=int, default=10)
     ap.add_argument("--out", default="memory_computation.txt")
+    ap.add_argument("--model", default=DEFAULT_MODEL)
     args = ap.parse_args()
 
     device = torch.device("cuda")
-    print(f"[bench] {MODEL_NAME} fp32  bs={args.batch_size} steps={args.steps} "
+    print(f"[bench] {args.model} fp32  bs={args.batch_size} steps={args.steps} "
           f"(1 warmup excluded)  gpu={torch.cuda.get_device_name(0)}", flush=True)
     for task in args.tasks:
         for method in args.methods:
             try:
                 bench_one(method, task, args.batch_size, args.steps,
-                          device, args.out)
+                          device, args.out, args.model)
             except Exception as e:
                 print(f"[bench] FAIL {method}/{task}: {type(e).__name__}: {e}",
                       flush=True)
